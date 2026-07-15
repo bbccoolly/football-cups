@@ -2,8 +2,8 @@
 
 > 更新日期：2026-07-15
 > 当前阶段：阶段 1 - 数据源候选与验收
-> 阶段状态：免费研究数据获取计划已固化，正式数据源验收尚未开始
-> 下一次更新触发：执行研究数据小样本、获得首批候选数据源信息或本页任一状态发生变化
+> 阶段状态：免费研究数据三市场与单页批量验证完成，正式数据源验收尚未开始
+> 下一次更新触发：补齐跨时段/跨赛事 URL、执行跨时段历史变盘验证、获得首批候选数据源信息或本页任一状态发生变化
 
 本文件是当前进度的唯一入口。产品边界以 `docs/product-plan.md` 为准，阶段要求以 `docs/execution-plan.md` 为准，历史选择以 `docs/decision-log.md` 为准。免费研究数据获取步骤见 `docs/research-data-acquisition-plan.md`。
 
@@ -15,6 +15,16 @@
 - [x] 建立项目总控 Agent 契约、恢复顺序和阶段门禁。
 - [x] 建立项目状态、决策日志和数据源评估模板。
 - [x] 固化 2025 年至当前时间的免费研究数据获取计划。
+- [x] 创建 `data/research` 本地研究目录结构。
+- [x] 下载 Football-Data 五大联赛 2024/25 和 2025/26 共 10 个 CSV。
+- [x] 生成 Football-Data manifest 和范围统计报告。
+- [x] 安装并验证 `oddsharvester==0.4.0` CLI。
+- [x] 通过本机 Chrome junction 绕过 Playwright Chromium 下载阻塞。
+- [x] 使用 CentroQuote 区域镜像完成 OddsHarvester 单场 1X2 JSON 样本。
+- [x] 完成 CentroQuote 单场 1X2、大小球 2.5、亚洲让球 0 三市场验证。
+- [x] 完成单场 1X2 历史变盘抓取，确认 OddsHarvester 将 2025 年错误写成当前年份 2026。
+- [x] 建立可重复的 CentroQuote 本地补丁脚本与研究派生转换脚本。
+- [x] 完成英超 2024/25 单页 50 场批量验证：成功 23，失败 27，成功率 46%。
 
 ## 2. 当前目标
 
@@ -26,7 +36,8 @@
 - 尚无独立公开赔率展示源。
 - 尚无独立赛果校验源。
 - 数据使用授权、历史变盘完整度和时间语义均未验证。
-- 研究数据尚未执行下载、解析和小样本验证。
+- CentroQuote 英超单页批量成功率仅 46%，不能作为完整历史回填主源。
+- 尚缺 2025 年 8 至 12 月及 2026 年 K1/欧战/世界杯比赛 URL，跨时段和跨赛事稳定性未验证。
 
 以上阻塞不会妨碍候选调研，但会阻止项目进入阶段 2。
 
@@ -63,7 +74,9 @@
 
 按 `docs/research-data-acquisition-plan.md` 执行前，需要补齐：
 
-- [ ] 提供 3 场跨年份 OddsPortal 比赛 URL：2025 年 1 至 5 月、2025 年 8 至 12 月、2026 年 K1/欧战/世界杯。
+- [x] 取得 2025 年 1 至 5 月样本 URL：Liverpool vs Tottenham，2025-04-27。
+- [ ] 提供 2025 年 8 至 12 月 OddsPortal 或 CentroQuote 比赛 URL。
+- [ ] 提供 2026 年 K1/欧战/世界杯 OddsPortal 或 CentroQuote 比赛 URL。
 - [ ] 核验世界杯各赛区预选赛页面，并记录可访问比赛 URL。
 - [x] 确认研究数据只用于个人学习，不改变正式授权数据源验收门禁。
 
@@ -71,11 +84,10 @@
 
 没有人工 URL 时，Agent 的下一步是：
 
-1. 创建被 Git 忽略的 `data/research` 目录结构。
-2. 下载 Football-Data 的五大联赛 2024/25 和 2025/26 CSV。
-3. 生成下载 manifest、哈希和日期范围统计。
-4. 安装并验证 OddsHarvester 的英超无历史小样本。
-5. 等待人工提供跨年份比赛 URL 后再测试 `--odds-history`。
+1. 等待人工提供 2025 年 8 至 12 月及 2026 年 K1/欧战/世界杯比赛 URL。
+2. 对每个新时段先运行单场三市场无历史样本，再运行一类市场的 `--odds-history`。
+3. 使用研究派生脚本转换 American Odds，并对错误年份时间戳修正或隔离。
+4. 不扩大 CentroQuote 完整批量回填；其 46% 单页成功率只适合作为辅助研究样本。
 
 收到正式候选 API 信息后，Agent 的下一步是：
 
@@ -95,9 +107,29 @@
 | 时间字段含义不明确导致数据泄漏 | 未评估 | 核对字段文档和样本，无法确认时不得作为主数据源 |
 | 暂定预算不足 | 未评估 | 获得真实报价后重新决策，不预先放宽数据要求 |
 | 历史回抓数据被误用为严格回测数据 | 已识别 | 回抓数据标记 `backfill=true`、`strict_backtest_eligible=false` |
-| OddsHarvester 历史变盘年份可能错误 | 已识别 | 原始 JSON 不改写，派生层修正并输出隔离报告 |
+| OddsHarvester 历史变盘年份错误 | 已复现并隔离 | 单场 12 个时间戳由 2026 修正至 2025 UTC；无法满足开球前 180 天约束时进入隔离区 |
+| Playwright Chromium 下载不稳定 | 已绕过 | 已用 junction 将 Playwright 预期 Chromium 路径指向本机 Chrome |
+| OddsPortal 主站无历史赔率行 | 已发生 | 主站提示 selected bookmakers 无可用赔率；改用 `https://www.centroquote.it` |
+| CentroQuote 单场存在 fragment mismatch | 部分缓解 | 意大利月份解析后部分场次可安全使用 DOM-first；无法确认目标场次时直接丢弃 |
+| CentroQuote 批量覆盖不足 | 已确认 | 英超单页 23/50 成功（46%）；不得作为完整历史回填主源 |
+| CentroQuote 输出为 Money Line | 已处理 | 原始层保留；派生脚本按 American Odds 公式生成十进制字段 |
 
-## 7. 恢复工作时首先执行
+## 7. 本地研究产物
+
+| 产物 | 路径 | 状态 |
+| --- | --- | --- |
+| Football-Data 原始 CSV | `data/research/raw/football-data/20260715T063843Z/` | 已生成，Git 忽略 |
+| Football-Data manifest | `data/research/manifests/20260715T063843Z-football-data-manifest.csv` | 已生成，Git 忽略 |
+| Football-Data 摘要 | `data/research/reports/20260715T063843Z-football-data-summary.md` | 已生成，Git 忽略 |
+| OddsHarvester 研究环境 | `data/research/runtime/venv-py314/` | 已安装包，Git 忽略 |
+| OddsHarvester 1X2 单场样本 | `data/research/raw/oddsharvester/20260715T072931Z/` | 已生成，Git 忽略 |
+| OddsHarvester 三市场单场样本 | `data/research/raw/oddsharvester/20260715T074243Z/` 等 | 1X2、OU 2.5、AH 0 均成功，Git 忽略 |
+| OddsHarvester 历史变盘样本 | `data/research/raw/oddsharvester/20260715T074617Z/` | 1 场、2 家公司，Git 忽略 |
+| OddsHarvester 英超单页批量 | `data/research/raw/oddsharvester/20260715T075122Z/` | 23/50 成功，Git 忽略 |
+| OddsHarvester 派生样本 | `data/research/derived/oddsharvester/` | 十进制赔率与修正时间，Git 忽略 |
+| OddsHarvester 页面诊断 | `data/research/reports/oddsharvester-diagnostics/` | 已生成，Git 忽略 |
+
+## 8. 恢复工作时首先执行
 
 1. 按根目录 `AGENTS.md` 的顺序阅读权威文档。
 2. 确认本页更新时间、当前阶段和阻塞项是否仍有效。

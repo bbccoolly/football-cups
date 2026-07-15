@@ -1,7 +1,7 @@
 # 免费研究数据获取计划
 
 > 版本：V1.0
-> 状态：待执行
+> 状态：部分执行
 > 更新日期：2026-07-15
 > 适用范围：个人学习研究数据获取，不代表正式产品数据源验收通过
 
@@ -23,7 +23,7 @@
 | OddsHarvester | 历史盘口研究，覆盖多赛事、多市场、多公司 | 主要研究来源 | 需验证历史变盘时间年份修正问题 |
 | FlashscoreScraper | 单场人工交叉验证 | 辅助校验来源 | 只用于小样本人工核对 |
 
-已确认 Football-Data 的五大联赛 2024/25 和 2025/26 CSV 可访问；已确认 OddsHarvester `0.4.0` 支持 `1x2`、`over_under`、`asian_handicap`、`--odds-history`、JSON/CSV、多公司和历史赛季。以上确认时间为 2026-07-15。
+已确认 Football-Data 的五大联赛 2024/25 和 2025/26 CSV 可访问；已确认 OddsHarvester `0.4.0` 支持 `1x2`、具体大小球枚举如 `over_under_2_5`、具体亚洲让球枚举如 `asian_handicap_0`、`--odds-history`、JSON/CSV、多公司和历史赛季。以上确认时间为 2026-07-15。
 
 ## 3. 数据分层规则
 
@@ -139,13 +139,15 @@ py -3.14 -m venv .venv
 7. 世界杯研究样本。
 8. 世界杯预选赛人工 URL 样本。
 
-市场逐项运行，不混在一个文件中：
+市场逐项运行，不混在一个文件中。OddsHarvester 不使用泛称 `over_under` 或 `asian_handicap`，需要指定具体盘口线：
 
 ```text
 1x2
-over_under
-asian_handicap
+over_under_2_5
+asian_handicap_0
 ```
+
+后续批量研究时，应先用 `over_under_2_5` 和 `asian_handicap_0` 验证结构，再根据赛事样本扩展到其他盘口线枚举。
 
 运行规则：
 
@@ -210,12 +212,51 @@ Agent 后续可以执行以下范围受限的研究任务：
 
 ## 12. 下一步
 
-下一次执行应从小样本开始：
+下一次执行应从补齐跨时段、跨赛事样本开始：
 
-1. 创建 `data/research` 目录结构。
-2. 下载 Football-Data 10 个 CSV。
-3. 生成 manifest 和范围统计。
-4. 安装并验证 OddsHarvester。
-5. 等待人工提供 3 场跨年份比赛 URL 后测试历史变盘。
+1. 人工提供 2025 年 8 至 12 月比赛 URL，以及 2026 年 K1/欧战/世界杯比赛 URL。
+2. 每个新时段先执行 `1x2`、`over_under_2_5`、`asian_handicap_0` 单场无历史验证。
+3. 每个新时段至少执行一类市场的 `--odds-history`，核对年份修正与隔离统计。
+4. 使用 `scripts/research/normalize_oddsharvester_sample.py` 生成研究派生数据，不修改原始 JSON。
+5. 不扩大 CentroQuote 完整历史批量回填；英超单页成功率仅 46%，不足以承担完整历史来源。
 
-若没有人工 URL，Agent 只能完成 Football-Data 下载和 OddsHarvester 无历史小样本，不应假装历史变盘验证已经完成。
+若没有新的人工 URL，当前免费研究获取工作停在已验证范围，不重复扩大 CentroQuote 批量抓取，也不应把单场结果外推到 K1、欧战或世界杯。
+
+## 13. 执行记录
+
+### 2026-07-15 小样本执行
+
+- Football-Data：已完成 10 个 CSV 下载，`run_id=20260715T063843Z`。
+- Football-Data 结果：下载成功 10/10，总行数 3504，日期解析成功 3504，目标范围内 2685 行。
+- Football-Data 报告：`data/research/reports/20260715T063843Z-football-data-summary.md`。
+- OddsHarvester：已在 `data/research/runtime/venv-py314` 安装 `oddsharvester==0.4.0` 并验证 CLI 可用。
+- OddsHarvester CLI：实际入口为 `python -m oddsharvester historic`；无历史样本命令需要使用 `historic -s football -l england-premier-league --season 2025-2026 -m 1x2 --max-pages 1`。
+- Playwright Chromium：默认 CDN、`npmmirror` 和 `--only-shell` 下载均未完成；已通过 junction 将 `C:\Users\lcz\AppData\Local\ms-playwright\chromium-1228\chrome-win64` 指向本机 Chrome 安装目录，使 `--no-headless` 可启动。
+- OddsPortal 主站：英超历史页提示 selected bookmakers 无可用赔率，列表页没有比赛行。
+- CentroQuote 镜像：`https://www.centroquote.it` 可显示英超 2024/25 列表页，诊断样本显示 `eventRow=50`。
+- OddsHarvester 本地研究补丁：允许 `www.centroquote.it` 作为 `--match-link` 域名，并支持 CentroQuote 的意大利月份缩写；可用 `scripts/research/patch_oddsharvester_centroquote.py` 在重建环境后重复应用。
+- OddsHarvester 1X2 单场：`Liverpool 5-1 Tottenham` 样本成功，输出 `data/research/raw/oddsharvester/20260715T072931Z/single-liverpool-tottenham-2024-2025-1x2-centroquote.json`。
+- OddsHarvester 三市场单场：修复月份解析后，1X2、`over_under_2_5` 和 `asian_handicap_0` 均成功；OU 解析 2 家公司，AH 解析 1 家公司。
+- OddsHarvester 历史变盘：1X2 `--odds-history` 成功解析 2 家公司；12 个时间戳把 2025 年错误写成 2026 年，已在派生层修正且无隔离项。
+- 赔率格式：CentroQuote 在切换历史场次时仍返回 Money Line。原始层保留 `-500`、`+600` 等值；派生脚本明确按 American Odds 公式生成十进制字段。
+- 派生样本：单场历史样本转换 18 个赔率值、修正 12 个时间戳；`backfill=true`，`strict_backtest_eligible=false`。
+- 英超单页批量：`run_id=20260715T075122Z`，50 个链接成功 23、失败 27，成功率 46%；成功记录日期为 2025-04-22 至 2025-05-25，比分与市场无缺失，共 46 个公司行。
+- 批量结论：CentroQuote 只能作为免费研究辅助源，不能作为完整历史回填主源；未解析 fragment 的场次必须丢弃，禁止退回 stale JSON。
+
+重建研究环境后执行本地兼容补丁：
+
+```powershell
+data\research\runtime\venv-py314\Scripts\python.exe `
+  scripts\research\patch_oddsharvester_centroquote.py
+```
+
+原始 JSON 抓取完成后生成派生样本：
+
+```powershell
+data\research\runtime\venv-py314\Scripts\python.exe `
+  scripts\research\normalize_oddsharvester_sample.py `
+  <raw-json> <derived-json> `
+  --source-timezone Europe/Rome
+```
+
+派生脚本只接受已确认是 American Odds 的 CentroQuote 样本。若网站返回格式改变，必须先人工核验，不得直接套用转换。
