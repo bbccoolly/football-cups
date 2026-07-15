@@ -47,6 +47,25 @@ coverage.xml
 *.tmp
 *.temp
 
+# Local datasets and exports
+data/**
+!data/.gitkeep
+!data/README.md
+
+# Local databases, backups, and runtime state
+*.db
+*.sqlite
+*.sqlite3
+backups/
+run/
+*.pid
+
+# Generated model and experiment artifacts
+artifacts/
+models/*.joblib
+models/*.pkl
+models/*.onnx
+
 # Operating system files
 .DS_Store
 Thumbs.db
