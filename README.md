@@ -16,6 +16,7 @@
 - `docs/project-status.md`：当前状态、阻塞项和人工待办
 - `docs/decision-log.md`：已接受与暂定决策
 - `docs/data-source-evaluation.md`：候选数据源证据、评分和验收记录
+- `docs/research-data-acquisition-plan.md`：2025 年至当前时间的免费研究数据获取步骤
 
 中断较长时间后，按照 `AGENTS.md` 的启动顺序恢复工作，不依赖聊天历史。
 
