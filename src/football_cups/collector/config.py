@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+DISCOVERY_SOURCES: tuple[tuple[str, str], ...] = (
+    ("default", "https://trade.500.com/jczq/"),
+    ("spf", "https://trade.500.com/jczq/?playid=269&g=2"),
+    ("mixed", "https://trade.500.com/jczq/?playid=312&g=2"),
+    ("score", "https://trade.500.com/jczq/?playid=271&g=2"),
+    ("goals", "https://trade.500.com/jczq/?playid=270&g=2"),
+    ("half_full", "https://trade.500.com/jczq/?playid=272&g=2"),
+)
+
+MARKETS: tuple[str, ...] = ("ouzhi", "yazhi", "daxiao", "rangqiu")
+CORE_MARKETS: frozenset[str] = frozenset({"ouzhi", "yazhi", "daxiao"})
+
+# target -> (minutes before kickoff, freshness window in minutes)
+CUTOFFS: dict[str, tuple[int, int]] = {
+    "T-48h": (48 * 60, 120),
+    "T-24h": (24 * 60, 120),
+    "T-12h": (12 * 60, 30),
+    "T-6h": (6 * 60, 30),
+    "T-3h": (3 * 60, 15),
+    "T-60m": (60, 10),
+    "T-30m": (30, 5),
+    "T-10m": (10, 3),
+}
+
+
+def _load_dotenv(path: Path) -> None:
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name, "").strip()
+    return float(value) if value else default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    return int(value) if value else default
+
+
+@dataclass(frozen=True)
+class CollectorConfig:
+    workspace: Path
+    data_dir: Path
+    backup_dir: Path | None
+    timezone_name: str = "Asia/Shanghai"
+    discovery_interval_minutes: int = 30
+    request_min_interval_seconds: float = 1.5
+    run_time_budget_seconds: int = 100
+    clock_drift_limit_seconds: int = 30
+    request_timeout_seconds: int = 30
+    retry_delays_seconds: tuple[float, ...] = (2.0, 5.0, 15.0)
+    log_level: str = "INFO"
+
+    @classmethod
+    def from_workspace(cls, workspace: Path) -> "CollectorConfig":
+        workspace = workspace.resolve()
+        _load_dotenv(workspace / ".env")
+        data_value = os.environ.get("FOOTBALL_CUPS_DATA_DIR", "").strip()
+        backup_value = os.environ.get("FOOTBALL_CUPS_BACKUP_DIR", "").strip()
+        return cls(
+            workspace=workspace,
+            data_dir=(Path(data_value).expanduser().resolve() if data_value else workspace / "data" / "500"),
+            backup_dir=Path(backup_value).expanduser().resolve() if backup_value else None,
+            timezone_name=os.environ.get("APP_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
+            discovery_interval_minutes=_env_int("COLLECTOR_DISCOVERY_INTERVAL_MINUTES", 30),
+            request_min_interval_seconds=_env_float("COLLECTOR_REQUEST_MIN_INTERVAL_SECONDS", 1.5),
+            run_time_budget_seconds=_env_int("COLLECTOR_RUN_TIME_BUDGET_SECONDS", 100),
+            clock_drift_limit_seconds=_env_int("COLLECTOR_CLOCK_DRIFT_LIMIT_SECONDS", 30),
+            log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        )
+
+    @property
+    def state_path(self) -> Path:
+        return self.data_dir / "state" / "collector.sqlite3"
+
+    @property
+    def lock_path(self) -> Path:
+        return self.data_dir / "state" / "collector.lock"
+
+    def ensure_directories(self) -> None:
+        for relative in (
+            "raw/blobs",
+            "discovery",
+            "manifests",
+            "normalized",
+            "results",
+            "reports/daily",
+            "quarantine",
+            "state",
+            "logs",
+        ):
+            (self.data_dir / relative).mkdir(parents=True, exist_ok=True)
+

@@ -1,139 +1,58 @@
 # 项目当前状态
 
 > 更新日期：2026-07-15
-> 当前阶段：阶段 1 - 数据源候选与验收
-> 阶段状态：免费研究数据三市场与单页批量验证完成，正式数据源验收尚未开始
-> 下一次更新触发：补齐跨时段/跨赛事 URL、执行跨时段历史变盘验证、获得首批候选数据源信息或本页任一状态发生变化
+> 当前阶段：阶段 1 - 500 竞彩全赛事发现与技术验收
+> 阶段状态：验证采集器已实现，24 小时连续验证运行中
 
-本文件是当前进度的唯一入口。产品边界以 `docs/product-plan.md` 为准，阶段要求以 `docs/execution-plan.md` 为准，历史选择以 `docs/decision-log.md` 为准。免费研究数据获取步骤见 `docs/research-data-acquisition-plan.md`。
+本文件是当前进度的唯一入口。产品边界见 `docs/product-plan.md`，阶段门槛见 `docs/execution-plan.md`，历史决策见 `docs/decision-log.md`。
 
-## 1. 已完成
+## 已完成
 
-- [x] 初始化 Git 仓库和基础忽略规则。
-- [x] 完成产品方案 V1.1。
-- [x] 完成长期执行计划 V1.2。
-- [x] 建立项目总控 Agent 契约、恢复顺序和阶段门禁。
-- [x] 建立项目状态、决策日志和数据源评估模板。
-- [x] 固化 2025 年至当前时间的免费研究数据获取计划。
-- [x] 创建 `data/research` 本地研究目录结构。
-- [x] 下载 Football-Data 五大联赛 2024/25 和 2025/26 共 10 个 CSV。
-- [x] 生成 Football-Data manifest 和范围统计报告。
-- [x] 安装并验证 `oddsharvester==0.4.0` CLI。
-- [x] 通过本机 Chrome junction 绕过 Playwright Chromium 下载阻塞。
-- [x] 使用 CentroQuote 区域镜像完成 OddsHarvester 单场 1X2 JSON 样本。
-- [x] 完成 CentroQuote 单场 1X2、大小球 2.5、亚洲让球 0 三市场验证。
-- [x] 完成单场 1X2 历史变盘抓取，确认 OddsHarvester 将 2025 年错误写成当前年份 2026。
-- [x] 建立可重复的 CentroQuote 本地补丁脚本与研究派生转换脚本。
-- [x] 完成英超 2024/25 单页 50 场批量验证：成功 23，失败 27，成功率 46%。
+- [x] 仓库治理、Git 忽略和 Agent 恢复协议。
+- [x] 纯盘口、90 分钟、append-only 和 observed-at 防泄漏边界。
+- [x] Football-Data 五大联赛 10 个 CSV 下载和范围统计。
+- [x] OddsHarvester/CentroQuote 单场三市场、历史变盘和 50 场批量研究。
+- [x] 确认 CentroQuote 批量成功率 46%，只作为历史辅助研究。
+- [x] 分析 `D:\2026-worldCup` 的 500 四市场抓取与赛果记录实现。
+- [x] 实测 500 竞彩六个玩法入口可返回带稳定 fixture ID 的比赛行。
+- [x] 确认 500 完场页和分析页可按 fixture ID 提供候选比分证据。
+- [x] 完成 500 全赛事长期采集计划 V2 的设计与审查。
+- [x] 完成六个竞彩玩法入口真实 smoke test：10 场、6/6 来源成功、0 身份冲突。
+- [x] 完成首批四市场 smoke test：6 场三核心市场全部成功；让球指数缺失或失败独立记录。
+- [x] 完成验证采集器 CLI、不可变 blob、标准化 JSONL、SQLite 调度、日报、备份和状态重建。
+- [x] 完成 10 场首见市场闭环：9 场三核心市场完整，1 场来源持续失败后标记 `partial`。
+- [x] Python 3.11 项目 `.venv` 安装完成，离线测试 18 项通过，依赖检查无冲突。
+- [x] 安装 `FootballCups-500-Collector` 交互式验证任务，首次运行结果为 0。
 
-## 2. 当前目标
+## 当前目标
 
-收集足够证据，筛选出 2 至 4 个可合法保存、分析和建模的授权盘口 API 候选，并准备进入试用验证。同时可按 `docs/research-data-acquisition-plan.md` 获取个人学习研究样本，用于字段和覆盖验证。当前不开发正式数据库、模型、采集器或 Web 产品。
+保持验证版 Windows 定时任务运行至 2026-07-16 19:11 Asia/Shanghai，形成首份完整 24 小时报告，再继续 7 天技术验收。当前结果不能替代连续运行门槛。
 
-## 3. 当前阻塞项
+## 当前阻塞与风险
 
-- 尚无候选授权盘口 API 信息。
-- 尚无独立公开赔率展示源。
-- 尚无独立赛果校验源。
-- 数据使用授权、历史变盘完整度和时间语义均未验证。
-- CentroQuote 英超单页批量成功率仅 46%，不能作为完整历史回填主源。
-- 尚缺 2025 年 8 至 12 月及 2026 年 K1/欧战/世界杯比赛 URL，跨时段和跨赛事稳定性未验证。
+- 7 天技术验收尚未开始，采集器不能标记为技术通过。
+- 30 天稳定性验收尚未开始，不能进入 PostgreSQL、模型或 Web 阶段。
+- 本地 Windows 长期运行需要人工保证联网、不休眠和系统时间准确。
+- 当前 Codex 进程非管理员，S4U 任务注册被 Windows 拒绝；24 小时验证使用显式 `-Interactive` 回退，30 天验收前必须提升权限重装默认模式。
+- 尚未提供另一物理磁盘或网络备份目录；这不阻止开发和 7 天验证，但阻止 30 天验收通过。
+- 杯赛及赛事格式未知的比分不能自动视为 90 分钟赛果。
+- 广泛赛事可能来源缺盘；必须与程序失败分开统计。
+- 首批 10 场中有 1 场亚盘、大小球和让球指数导出持续返回 HTTP 500；已保留欧赔和失败证据并标记 `partial`。
 
-以上阻塞不会妨碍候选调研，但会阻止项目进入阶段 2。
+## 人工待办
 
-## 4. 人工待办
+- [ ] 7 天验证开始后，每天核对一次网页比赛数量和至少 3 场解析数据。
+- [ ] 确认 Windows 在验证期间不休眠、保持登录并保持网络连接。
+- [ ] 为出现的新赛事登记是否可能加时。
+- [ ] 30 天验收前设置 `FOOTBALL_CUPS_BACKUP_DIR`，指向另一物理磁盘或网络路径。
 
-### 4.1 授权 API 候选
+## Agent 唯一下一步
 
-请查找 2 至 4 个候选，每个候选填写到 `docs/data-source-evaluation.md`：
+在 2026-07-16 19:11 Asia/Shanghai 之后检查验证任务、日报和采集空窗，人工核对页面比赛数和至少 3 场数据；完成前不宣称 24 小时或 7 天验收通过。
 
-- [ ] 官网和产品名称
-- [ ] API 文档地址
-- [ ] 套餐价格、试用条件和退款规则
-- [ ] 请求频率和月度配额
-- [ ] 五大联赛、欧战、世界杯及预选赛、K1 覆盖情况
-- [ ] 欧赔、亚洲让球、大小球覆盖情况
-- [ ] 是否提供带时间戳的完整历史变盘
-- [ ] 比赛、赛事、球队和公司 ID 是否稳定
-- [ ] 时间字段定义、格式和时区
-- [ ] 是否明确允许本地保存、分析、建模和长期使用
-- [ ] 服务条款和数据许可链接及核验日期
-- [ ] 试用申请和技术支持方式
+## 恢复工作时首先执行
 
-不要购买长期套餐，也不要把 API Key 写入文档或聊天。
-
-### 4.2 独立校验源
-
-- [ ] 提供 1 个公开赔率展示源及网址，仅用于人工盘口对比。
-- [ ] 提供 1 个独立赛果源及网址，用于比赛身份和常规时间赛果校验。
-- [ ] 记录两个来源的访问限制和核验日期。
-
-公开网页在条款未明确允许前不得自动化采集。
-
-### 4.3 免费研究数据小样本
-
-按 `docs/research-data-acquisition-plan.md` 执行前，需要补齐：
-
-- [x] 取得 2025 年 1 至 5 月样本 URL：Liverpool vs Tottenham，2025-04-27。
-- [ ] 提供 2025 年 8 至 12 月 OddsPortal 或 CentroQuote 比赛 URL。
-- [ ] 提供 2026 年 K1/欧战/世界杯 OddsPortal 或 CentroQuote 比赛 URL。
-- [ ] 核验世界杯各赛区预选赛页面，并记录可访问比赛 URL。
-- [x] 确认研究数据只用于个人学习，不改变正式授权数据源验收门禁。
-
-## 5. Agent 下一步
-
-没有人工 URL 时，Agent 的下一步是：
-
-1. 等待人工提供 2025 年 8 至 12 月及 2026 年 K1/欧战/世界杯比赛 URL。
-2. 对每个新时段先运行单场三市场无历史样本，再运行一类市场的 `--odds-history`。
-3. 使用研究派生脚本转换 American Odds，并对错误年份时间戳修正或隔离。
-4. 不扩大 CentroQuote 完整批量回填；其 46% 单页成功率只适合作为辅助研究样本。
-
-收到正式候选 API 信息后，Agent 的下一步是：
-
-1. 将每条信息及证据链接录入数据源评估表。
-2. 标记缺失证据，不根据营销描述推断授权或技术能力。
-3. 检查硬性淘汰项并按 100 分规则初评。
-4. 输出首选试用候选、备选候选和待人工确认问题。
-5. 只有候选初评达到 80 分且无硬性淘汰项，才准备试用验证；此时仍不代表数据源最终验收通过。
-
-## 6. 当前风险
-
-| 风险 | 状态 | 处理方式 |
-| --- | --- | --- |
-| 供应商只提供当前赔率，没有历史变盘 | 未评估 | 核对文档和样本；必要时评估常驻采集可行性 |
-| 数据许可不允许长期保存或建模 | 未评估 | 以条款和供应商书面答复为证据，触发时直接淘汰 |
-| K1 或杯赛公司覆盖不足 | 未评估 | 分赛事统计覆盖率，不用五大联赛结果代替 |
-| 时间字段含义不明确导致数据泄漏 | 未评估 | 核对字段文档和样本，无法确认时不得作为主数据源 |
-| 暂定预算不足 | 未评估 | 获得真实报价后重新决策，不预先放宽数据要求 |
-| 历史回抓数据被误用为严格回测数据 | 已识别 | 回抓数据标记 `backfill=true`、`strict_backtest_eligible=false` |
-| OddsHarvester 历史变盘年份错误 | 已复现并隔离 | 单场 12 个时间戳由 2026 修正至 2025 UTC；无法满足开球前 180 天约束时进入隔离区 |
-| Playwright Chromium 下载不稳定 | 已绕过 | 已用 junction 将 Playwright 预期 Chromium 路径指向本机 Chrome |
-| OddsPortal 主站无历史赔率行 | 已发生 | 主站提示 selected bookmakers 无可用赔率；改用 `https://www.centroquote.it` |
-| CentroQuote 单场存在 fragment mismatch | 部分缓解 | 意大利月份解析后部分场次可安全使用 DOM-first；无法确认目标场次时直接丢弃 |
-| CentroQuote 批量覆盖不足 | 已确认 | 英超单页 23/50 成功（46%）；不得作为完整历史回填主源 |
-| CentroQuote 输出为 Money Line | 已处理 | 原始层保留；派生脚本按 American Odds 公式生成十进制字段 |
-
-## 7. 本地研究产物
-
-| 产物 | 路径 | 状态 |
-| --- | --- | --- |
-| Football-Data 原始 CSV | `data/research/raw/football-data/20260715T063843Z/` | 已生成，Git 忽略 |
-| Football-Data manifest | `data/research/manifests/20260715T063843Z-football-data-manifest.csv` | 已生成，Git 忽略 |
-| Football-Data 摘要 | `data/research/reports/20260715T063843Z-football-data-summary.md` | 已生成，Git 忽略 |
-| OddsHarvester 研究环境 | `data/research/runtime/venv-py314/` | 已安装包，Git 忽略 |
-| OddsHarvester 1X2 单场样本 | `data/research/raw/oddsharvester/20260715T072931Z/` | 已生成，Git 忽略 |
-| OddsHarvester 三市场单场样本 | `data/research/raw/oddsharvester/20260715T074243Z/` 等 | 1X2、OU 2.5、AH 0 均成功，Git 忽略 |
-| OddsHarvester 历史变盘样本 | `data/research/raw/oddsharvester/20260715T074617Z/` | 1 场、2 家公司，Git 忽略 |
-| OddsHarvester 英超单页批量 | `data/research/raw/oddsharvester/20260715T075122Z/` | 23/50 成功，Git 忽略 |
-| OddsHarvester 派生样本 | `data/research/derived/oddsharvester/` | 十进制赔率与修正时间，Git 忽略 |
-| OddsHarvester 页面诊断 | `data/research/reports/oddsharvester-diagnostics/` | 已生成，Git 忽略 |
-
-## 8. 恢复工作时首先执行
-
-1. 按根目录 `AGENTS.md` 的顺序阅读权威文档。
-2. 确认本页更新时间、当前阶段和阻塞项是否仍有效。
-3. 检查 `docs/data-source-evaluation.md` 是否已有新的候选证据。
-4. 检查 Git 是否存在未提交或未推送内容。
-5. 检查 `docs/research-data-acquisition-plan.md` 的研究小样本是否已执行。
-6. 从第 4 节第一个未完成的人工待办或第 5 节 Agent 下一步继续，不重复已完成调研，不越过阶段门禁。
+1. 按 `AGENTS.md` 顺序读取权威文档。
+2. 检查 Git 和本地 `data/500/` 状态。
+3. 运行 `football-cups-collector report-daily` 查看最后心跳和失败。
+4. 从本页“Agent 唯一下一步”继续，不重复历史 URL 调研，不越过阶段门禁。
