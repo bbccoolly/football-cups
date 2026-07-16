@@ -39,6 +39,7 @@
 - [x] 修正 systemd 重试限制位置，采集器不再依赖 PostgreSQL，并限制正式服务写入数据盘。
 - [x] 增加 Ubuntu smoke、数据盘安全准备、systemd 安装和 OSS 往返校验脚本。
 - [x] 云迁移 V1.1 改动通过 45 项测试，包含真实隔离 PostgreSQL 集成测试；Bash 语法和文档链接检查通过。
+- [x] ECS 完成 Ubuntu 软件包更新、Python 3.11.15、2 GiB swap 和 `football-cups` 服务用户初始化；系统未要求重启。
 
 ## 当前目标
 
@@ -58,11 +59,13 @@
 
 以上是未满 24 小时的中期证据，不是验收结论。自然日质量日报包含验证开始前的 smoke test，不得代替精确的 24 小时窗口统计。
 
-截至 2026-07-16 16:30 Asia/Shanghai 的 ECS 基础证据：
+截至 2026-07-16 17:18 Asia/Shanghai 的 ECS 基础证据：
 
-- Ubuntu 22.04.5、2 vCPU / 4 GiB、40 GB 系统盘约 35 GB 可用、无 swap、无数据盘。
+- Ubuntu 22.04.5、2 vCPU / 4 GiB、40 GB 系统盘约 35 GB 可用，仍无数据盘。
 - NTP 已同步，时区为 Asia/Shanghai。
-- 系统 Python 为 3.10.12，尚未安装项目所需 Python 3.11+。
+- 已安装 Python 3.11.15，2 GiB `/swapfile` 已启用，`football-cups` 系统用户存在。
+- 已更新 53 个 Ubuntu 软件包；`cloud-init` 保持暂缓更新，系统未生成 `/var/run/reboot-required`。
+- ECS 仓库已核对发布提交 `f5872b5`；权限小修复 `ac6db46` 已发布，等待 ECS 执行 fast-forward 拉取。
 - ECS 访问 500 竞彩首页返回 HTTP 200；尚未执行六页面、四市场、完场页和分析页完整 smoke。
 - 当前没有启用云端 systemd timer，本地 Windows 仍是唯一正式采集写入者。
 
@@ -80,7 +83,7 @@
 - 尚未提供另一物理磁盘或网络备份目录；这不阻止开发和 7 天验证，但阻止 30 天验收通过。
 - 尚未配置 `FOOTBALL_CUPS_OSS_BACKUP_DIR` 并完成 OSS 风格备份恢复；这阻止阿里云正式切换。
 - ECS 当前只有 40 GB 系统盘；根据 D-017，只能用于隔离 smoke，至少 100 GB 数据盘挂载并通过重启验证前不得启用正式 timer。
-- ECS 尚无 swap、Python 3.11、PostgreSQL 17、私有 OSS/RAM Role 和正式环境文件。
+- ECS 尚未安装项目虚拟环境、smoke 配置、PostgreSQL 17、私有 OSS/RAM Role 和正式环境文件。
 - 云端完整 smoke 尚未执行；当前 HTTP 200 只证明竞彩首页可达。
 - 当前任务只运行 `run-once`，会自动生成自然日日报，但不会自动执行异盘备份；30 天验收前必须补充独立备份调度并完成恢复演练。
 - 杯赛及赛事格式未知的比分不能自动视为 90 分钟赛果。
@@ -96,14 +99,14 @@
 - [ ] 确认当前赛事格式，并由 Agent 写入 `config/competition-formats.json`；新赛事出现时继续登记。
 - [ ] 30 天验收前设置 `FOOTBALL_CUPS_BACKUP_DIR`，指向另一物理磁盘或网络路径。
 - [ ] 阿里云迁移前设置 `FOOTBALL_CUPS_OSS_BACKUP_DIR`，执行 `backup-oss` 并恢复到空目录验证。
-- [ ] 在 ECS 运行 `bootstrap-smoke.sh`，完成系统更新、Python 3.11、2 GiB swap 和隔离 smoke。
+- [ ] 在 ECS 安装项目虚拟环境和无密钥 smoke 配置，完成隔离 `discover + smoke-live`。
 - [ ] 在正式切换前增加至少 100 GB ESSD，人工确认设备后运行数据盘安全脚本并完成重启挂载验证。
 - [ ] 创建杭州私有 OSS Bucket 和最小权限 ECS RAM Role，完成真实上传、重新下载及 SHA-256 恢复。
 - [ ] 长期无人值守前，在提升的 PowerShell 中把采集和数据库导入任务都重装为 S4U 模式。
 
 ## Agent 唯一下一步
 
-在已创建的 ECS 上按 `docs/cloud-migration-plan.md` 执行 Ubuntu smoke 基础安装和隔离 `discover + smoke-live`，保持所有云端 timer 禁用并保留 Windows 单写入者。
+在 ECS fast-forward 到 `ac6db46`，安装项目虚拟环境和无密钥 smoke 配置，然后使用已验证的活跃 fixture `1363485` 与完场 fixture `1438672` 执行隔离 `discover + smoke-live`；保持所有云端 timer 禁用并保留 Windows 单写入者。
 
 ## 恢复工作时首先执行
 
