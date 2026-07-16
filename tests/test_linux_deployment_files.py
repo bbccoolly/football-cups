@@ -31,6 +31,14 @@ def test_collector_service_does_not_depend_on_postgresql() -> None:
     assert "postgresql.service" not in text
 
 
+def test_smoke_bootstrap_assigns_the_parent_directory_to_the_service_user() -> None:
+    text = (LINUX / "bootstrap-smoke.sh").read_text(encoding="utf-8")
+    assert (
+        "install -d -o football-cups -g football-cups -m 0750 "
+        "/var/lib/football-cups-smoke\n"
+    ) in text
+
+
 def test_data_disk_script_requires_explicit_apply_and_confirmation() -> None:
     text = (LINUX / "prepare-data-disk.sh").read_text(encoding="utf-8")
     assert "--confirm-device" in text

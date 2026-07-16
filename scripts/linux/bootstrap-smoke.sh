@@ -73,6 +73,7 @@ fi
 
 install -d -o root -g football-cups -m 0750 /opt/football-cups
 install -d -o root -g football-cups -m 0750 /etc/football-cups
+install -d -o football-cups -g football-cups -m 0750 /var/lib/football-cups-smoke
 install -d -o football-cups -g football-cups -m 0750 /var/lib/football-cups-smoke/500
 
 python3.11 --version

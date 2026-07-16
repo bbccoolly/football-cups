@@ -137,7 +137,7 @@ COLLECTOR_HEALTH_CLOCK_MAX_AGE_MINUTES=45
 
 ```bash
 sudo -u football-cups /opt/football-cups/.venv/bin/python -m pytest \
-  --basetemp=/var/lib/football-cups-smoke/test-tmp -p no:cacheprovider
+  --basetemp=/var/lib/football-cups-smoke/500/test-tmp -p no:cacheprovider
 sudo -u football-cups /opt/football-cups/.venv/bin/football-cups-collector init --workspace /opt/football-cups
 sudo -u football-cups /opt/football-cups/.venv/bin/football-cups-collector health --workspace /opt/football-cups
 sudo -u football-cups /opt/football-cups/.venv/bin/football-cups-collector discover --workspace /opt/football-cups
