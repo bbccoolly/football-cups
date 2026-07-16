@@ -59,6 +59,7 @@ class CollectorConfig:
     data_dir: Path
     backup_dir: Path | None
     oss_backup_dir: Path | None
+    required_mount: Path | None = None
     timezone_name: str = "Asia/Shanghai"
     discovery_interval_minutes: int = 30
     request_min_interval_seconds: float = 1.5
@@ -66,7 +67,32 @@ class CollectorConfig:
     clock_drift_limit_seconds: int = 30
     request_timeout_seconds: int = 30
     retry_delays_seconds: tuple[float, ...] = (2.0, 5.0, 15.0)
+    disk_warning_free_gb: float = 50.0
+    disk_critical_free_gb: float = 20.0
+    disk_warning_free_percent: float = 20.0
+    disk_critical_free_percent: float = 10.0
+    health_heartbeat_max_age_minutes: int = 10
+    health_discovery_max_age_minutes: int = 45
+    health_clock_max_age_minutes: int = 45
     log_level: str = "INFO"
+
+    def __post_init__(self) -> None:
+        if self.disk_critical_free_gb < 0 or self.disk_warning_free_gb < 0:
+            raise ValueError("disk free GB thresholds must be non-negative")
+        if not 0 <= self.disk_critical_free_percent <= 100:
+            raise ValueError("critical disk free percent must be between 0 and 100")
+        if not 0 <= self.disk_warning_free_percent <= 100:
+            raise ValueError("warning disk free percent must be between 0 and 100")
+        if self.disk_critical_free_gb > self.disk_warning_free_gb:
+            raise ValueError("critical disk free GB threshold cannot exceed warning threshold")
+        if self.disk_critical_free_percent > self.disk_warning_free_percent:
+            raise ValueError("critical disk free percent cannot exceed warning threshold")
+        if min(
+            self.health_heartbeat_max_age_minutes,
+            self.health_discovery_max_age_minutes,
+            self.health_clock_max_age_minutes,
+        ) <= 0:
+            raise ValueError("health age thresholds must be positive")
 
     @classmethod
     def from_workspace(cls, workspace: Path) -> "CollectorConfig":
@@ -75,18 +101,51 @@ class CollectorConfig:
         data_value = os.environ.get("FOOTBALL_CUPS_DATA_DIR", "").strip()
         backup_value = os.environ.get("FOOTBALL_CUPS_BACKUP_DIR", "").strip()
         oss_backup_value = os.environ.get("FOOTBALL_CUPS_OSS_BACKUP_DIR", "").strip()
+        required_mount_value = os.environ.get("FOOTBALL_CUPS_REQUIRED_MOUNT", "").strip()
         return cls(
             workspace=workspace,
             data_dir=(Path(data_value).expanduser().resolve() if data_value else workspace / "data" / "500"),
             backup_dir=Path(backup_value).expanduser().resolve() if backup_value else None,
             oss_backup_dir=Path(oss_backup_value).expanduser().resolve() if oss_backup_value else None,
+            required_mount=(
+                Path(required_mount_value).expanduser().resolve() if required_mount_value else None
+            ),
             timezone_name=os.environ.get("APP_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
             discovery_interval_minutes=_env_int("COLLECTOR_DISCOVERY_INTERVAL_MINUTES", 30),
             request_min_interval_seconds=_env_float("COLLECTOR_REQUEST_MIN_INTERVAL_SECONDS", 1.5),
             run_time_budget_seconds=_env_int("COLLECTOR_RUN_TIME_BUDGET_SECONDS", 100),
             clock_drift_limit_seconds=_env_int("COLLECTOR_CLOCK_DRIFT_LIMIT_SECONDS", 30),
+            disk_warning_free_gb=_env_float("COLLECTOR_DISK_WARNING_FREE_GB", 50.0),
+            disk_critical_free_gb=_env_float("COLLECTOR_DISK_CRITICAL_FREE_GB", 20.0),
+            disk_warning_free_percent=_env_float("COLLECTOR_DISK_WARNING_FREE_PERCENT", 20.0),
+            disk_critical_free_percent=_env_float("COLLECTOR_DISK_CRITICAL_FREE_PERCENT", 10.0),
+            health_heartbeat_max_age_minutes=_env_int(
+                "COLLECTOR_HEALTH_HEARTBEAT_MAX_AGE_MINUTES", 10
+            ),
+            health_discovery_max_age_minutes=_env_int(
+                "COLLECTOR_HEALTH_DISCOVERY_MAX_AGE_MINUTES", 45
+            ),
+            health_clock_max_age_minutes=_env_int(
+                "COLLECTOR_HEALTH_CLOCK_MAX_AGE_MINUTES", 45
+            ),
             log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         )
+
+    def required_mount_ready(self) -> bool:
+        if self.required_mount is None:
+            return True
+        return self.required_mount.is_dir() and os.path.ismount(self.required_mount)
+
+    def disk_thresholds(self, total_bytes: int) -> tuple[int, int]:
+        warning = max(
+            int(total_bytes * self.disk_warning_free_percent / 100),
+            int(self.disk_warning_free_gb * 1024**3),
+        )
+        critical = max(
+            int(total_bytes * self.disk_critical_free_percent / 100),
+            int(self.disk_critical_free_gb * 1024**3),
+        )
+        return warning, critical
 
     @property
     def state_path(self) -> Path:
@@ -97,6 +156,8 @@ class CollectorConfig:
         return self.data_dir / "state" / "collector.lock"
 
     def ensure_directories(self) -> None:
+        if not self.required_mount_ready():
+            raise OSError(f"required data mount is unavailable: {self.required_mount}")
         for relative in (
             "raw/blobs",
             "discovery",

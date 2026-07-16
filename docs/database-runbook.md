@@ -1,6 +1,6 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.0
+> 版本：V1.1
 > 更新日期：2026-07-16
 
 ## 1. 本地运行方式
@@ -108,3 +108,9 @@ $env:FOOTBALL_CUPS_TEST_DATABASE = '1'
 ```
 
 测试会删除并重建测试库中的 `football` schema，不得把这些变量指向主库。
+
+## 8. 阿里云 Linux 约束
+
+实际 ECS 使用 Ubuntu 22.04 和 PostgreSQL 17。正式集群数据目录位于 `/srv/football-cups/postgresql/17-main`，只监听 Unix socket 和 `127.0.0.1`；安全组和主机防火墙不得开放 5432。
+
+2 vCPU / 4 GiB 默认使用 `shared_buffers=512MB`、`effective_cache_size=2GB`、`work_mem=8MB`、`maintenance_work_mem=128MB` 和 `max_connections=20`。数据库 service 可以失败并稍后补数，但不得阻止采集器继续保存文件事实。完整安装、数据盘和切换门禁见 `docs/cloud-migration-plan.md`。

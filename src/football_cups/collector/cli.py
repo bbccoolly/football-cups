@@ -6,7 +6,7 @@ import logging
 import shutil
 import sqlite3
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -80,30 +80,204 @@ def _locked(config: CollectorConfig) -> SingleInstanceLock:
     return SingleInstanceLock(config.lock_path)
 
 
-def _health(config: CollectorConfig) -> dict[str, object]:
+def _health(config: CollectorConfig, *, now: datetime | None = None) -> dict[str, object]:
+    checked_at = now or utc_now()
+    mount_required = config.required_mount is not None
+    mount_ready = config.required_mount_ready()
+    mount = {
+        "required": mount_required,
+        "path": str(config.required_mount) if config.required_mount else None,
+        "mounted": mount_ready if mount_required else None,
+    }
+    if mount_required and not mount_ready:
+        return {
+            "status": "failed",
+            "checked_at": checked_at.isoformat().replace("+00:00", "Z"),
+            "data_dir": str(config.data_dir),
+            "required_mount": mount,
+            "issues": [
+                {
+                    "code": "required_mount_unavailable",
+                    "severity": "failed",
+                    "message": f"required data mount is unavailable: {config.required_mount}",
+                }
+            ],
+        }
+
     config.ensure_directories()
+    issues: list[dict[str, str]] = []
     with StateStore(config) as state:
         quick_check = state.connection.execute("PRAGMA quick_check").fetchone()[0]
         pending_jobs = state.connection.execute(
             "SELECT COUNT(*) FROM jobs WHERE status='pending'"
         ).fetchone()[0]
+        overdue_before = checked_at - timedelta(minutes=config.health_heartbeat_max_age_minutes)
+        overdue_jobs = state.connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status='pending' AND due_at<?",
+            (overdue_before.isoformat().replace("+00:00", "Z"),),
+        ).fetchone()[0]
         last_run = state.connection.execute(
             "SELECT run_type, status, started_at, finished_at FROM runs ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
-        usage = shutil.disk_usage(config.data_dir)
-        return {
-            "status": "ok" if quick_check == "ok" else "failed",
-            "checked_at": utc_now().isoformat().replace("+00:00", "Z"),
-            "data_dir": str(config.data_dir),
-            "state_quick_check": quick_check,
+        timestamps = {
             "last_heartbeat": state.get_meta("last_heartbeat_at"),
             "last_full_discovery": state.get_meta("last_full_discovery_at"),
+            "last_clock_check": state.get_meta("last_clock_check_at"),
+        }
+        last_clock_drift = state.get_meta("last_clock_drift_at")
+        last_clock_drift_seconds = state.get_meta("last_clock_drift_seconds")
+        parsed_clock_drift_seconds: float | None = None
+        if last_clock_drift_seconds is not None:
+            try:
+                parsed_clock_drift_seconds = float(last_clock_drift_seconds)
+            except ValueError:
+                issues.append(
+                    {
+                        "code": "last_clock_drift_seconds_invalid",
+                        "severity": "failed",
+                        "message": "last_clock_drift_seconds is not numeric",
+                    }
+                )
+
+        if quick_check != "ok":
+            issues.append(
+                {
+                    "code": "state_quick_check_failed",
+                    "severity": "failed",
+                    "message": f"SQLite quick_check returned {quick_check}",
+                }
+            )
+
+        age_limits = {
+            "last_heartbeat": config.health_heartbeat_max_age_minutes,
+            "last_full_discovery": config.health_discovery_max_age_minutes,
+            "last_clock_check": config.health_clock_max_age_minutes,
+        }
+        ages: dict[str, float | None] = {}
+        parsed_timestamps: dict[str, datetime] = {}
+        for name, value in timestamps.items():
+            if value is None:
+                ages[f"{name}_age_seconds"] = None
+                issues.append(
+                    {
+                        "code": f"{name}_missing",
+                        "severity": "warning",
+                        "message": f"{name} has not been recorded",
+                    }
+                )
+                continue
+            try:
+                parsed = parse_iso(value)
+            except ValueError:
+                ages[f"{name}_age_seconds"] = None
+                issues.append(
+                    {
+                        "code": f"{name}_invalid",
+                        "severity": "failed",
+                        "message": f"{name} is not a valid RFC 3339 timestamp",
+                    }
+                )
+                continue
+            parsed_timestamps[name] = parsed
+            age_seconds = (checked_at - parsed).total_seconds()
+            ages[f"{name}_age_seconds"] = round(age_seconds, 3)
+            if age_seconds < -config.clock_drift_limit_seconds:
+                issues.append(
+                    {
+                        "code": f"{name}_in_future",
+                        "severity": "failed",
+                        "message": f"{name} is ahead of the current clock",
+                    }
+                )
+            elif age_seconds > age_limits[name] * 60:
+                issues.append(
+                    {
+                        "code": f"{name}_stale",
+                        "severity": "failed",
+                        "message": f"{name} exceeds the {age_limits[name]} minute limit",
+                    }
+                )
+
+        if last_clock_drift is not None:
+            try:
+                drift_at = parse_iso(last_clock_drift)
+                last_full = parsed_timestamps.get("last_full_discovery")
+                if last_full is None or drift_at > last_full:
+                    issues.append(
+                        {
+                            "code": "unresolved_clock_drift",
+                            "severity": "failed",
+                            "message": "a clock drift event occurred after the last full discovery",
+                        }
+                    )
+            except ValueError:
+                issues.append(
+                    {
+                        "code": "last_clock_drift_invalid",
+                        "severity": "failed",
+                        "message": "last_clock_drift is not a valid RFC 3339 timestamp",
+                    }
+                )
+
+        if overdue_jobs:
+            issues.append(
+                {
+                    "code": "overdue_jobs",
+                    "severity": "warning",
+                    "message": (
+                        f"{overdue_jobs} pending jobs are overdue by more than "
+                        f"{config.health_heartbeat_max_age_minutes} minutes"
+                    ),
+                }
+            )
+
+        usage = shutil.disk_usage(config.data_dir)
+        warning_bytes, critical_bytes = config.disk_thresholds(usage.total)
+        if usage.free < critical_bytes:
+            disk_status = "critical"
+            issues.append(
+                {
+                    "code": "disk_space_critical",
+                    "severity": "failed",
+                    "message": "free disk space is below the critical threshold",
+                }
+            )
+        elif usage.free < warning_bytes:
+            disk_status = "warning"
+            issues.append(
+                {
+                    "code": "disk_space_warning",
+                    "severity": "warning",
+                    "message": "free disk space is below the warning threshold",
+                }
+            )
+        else:
+            disk_status = "ok"
+
+        status = "failed" if any(item["severity"] == "failed" for item in issues) else (
+            "warning" if issues else "ok"
+        )
+        return {
+            "status": status,
+            "checked_at": checked_at.isoformat().replace("+00:00", "Z"),
+            "data_dir": str(config.data_dir),
+            "required_mount": mount,
+            "state_quick_check": quick_check,
+            **timestamps,
+            **ages,
+            "last_clock_drift": last_clock_drift,
+            "last_clock_drift_seconds": parsed_clock_drift_seconds,
             "pending_jobs": pending_jobs,
+            "overdue_jobs": overdue_jobs,
             "last_run": dict(last_run) if last_run else None,
             "free_bytes": usage.free,
             "total_bytes": usage.total,
+            "disk_status": disk_status,
+            "disk_warning_bytes": warning_bytes,
+            "disk_critical_bytes": critical_bytes,
             "backup_dir_configured": config.backup_dir is not None,
             "oss_backup_dir_configured": config.oss_backup_dir is not None,
+            "issues": issues,
         }
 
 
@@ -113,9 +287,27 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
     args = parse_args(argv)
-    config = CollectorConfig.from_workspace(args.workspace)
-    config.ensure_directories()
-    configure_logging(config)
+    try:
+        config = CollectorConfig.from_workspace(args.workspace)
+    except ValueError as exc:
+        print(json_dumps({"status": "invalid", "error": str(exc)}, indent=2))
+        return 2
+
+    if args.command == "health":
+        try:
+            result = _health(config)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
+            return 3
+        print(json_dumps(result, indent=2))
+        return {"ok": 0, "warning": 1, "failed": 3}[str(result["status"])]
+
+    try:
+        config.ensure_directories()
+        configure_logging(config)
+    except OSError as exc:
+        print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
+        return 3
 
     if args.command == "init":
         with StateStore(config):
@@ -158,15 +350,6 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json_dumps(result, indent=2))
         return 0
-
-    if args.command == "health":
-        try:
-            result = _health(config)
-        except (OSError, sqlite3.Error) as exc:
-            print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
-            return 3
-        print(json_dumps(result, indent=2))
-        return 0 if result["status"] == "ok" else 3
 
     with _locked(config) as lock:
         if not lock.acquired:

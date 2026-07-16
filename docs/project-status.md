@@ -34,12 +34,17 @@
 - [x] 新增 `docs/cloud-migration-plan.md`，同步迁移前硬门槛、OSS 备份契约、systemd 运行和回滚规则。
 - [x] 新增迁移准备命令接口：`report-window`、`health`、`backup-oss`、`verify-oss-backup` 和 `smoke-live`。
 - [x] 新增 Linux systemd 采集与数据库导入 timer 模板。
+- [x] 根据实际 ECS 记录 D-017，将 Ubuntu 22.04 和 40 GB 单系统盘限定为隔离 smoke 环境。
+- [x] 增加可配置磁盘阈值、必需挂载点门禁和带时效判断的 `health` 状态。
+- [x] 修正 systemd 重试限制位置，采集器不再依赖 PostgreSQL，并限制正式服务写入数据盘。
+- [x] 增加 Ubuntu smoke、数据盘安全准备、systemd 安装和 OSS 往返校验脚本。
+- [x] 云迁移 V1.1 改动通过 45 项测试，包含真实隔离 PostgreSQL 集成测试；Bash 语法和文档链接检查通过。
 
 ## 当前目标
 
 保持采集和数据库导入任务连续运行，完成 24 小时及后续采集验证、赛事格式登记和 90 分钟赛果闭环。阶段 4 仍需至少 500 场严格快照及已验证赛果，当前不得开始模型。
 
-同时准备阿里云迁移，但正式切换前必须先完成精确 24 小时窗口报告、人工抽查、备份恢复和云端 smoke test。云端切换后 7 天和 30 天验收重新计时。
+同时在实际已创建的阿里云杭州 ECS 上准备隔离 smoke。正式切换前必须完成精确 24 小时窗口报告、人工抽查、至少 100 GB 数据盘、真实 OSS 恢复和云端完整 smoke。云端切换后 7 天和 30 天验收重新计时。
 
 ## 当前运行证据
 
@@ -53,6 +58,16 @@
 
 以上是未满 24 小时的中期证据，不是验收结论。自然日质量日报包含验证开始前的 smoke test，不得代替精确的 24 小时窗口统计。
 
+截至 2026-07-16 16:30 Asia/Shanghai 的 ECS 基础证据：
+
+- Ubuntu 22.04.5、2 vCPU / 4 GiB、40 GB 系统盘约 35 GB 可用、无 swap、无数据盘。
+- NTP 已同步，时区为 Asia/Shanghai。
+- 系统 Python 为 3.10.12，尚未安装项目所需 Python 3.11+。
+- ECS 访问 500 竞彩首页返回 HTTP 200；尚未执行六页面、四市场、完场页和分析页完整 smoke。
+- 当前没有启用云端 systemd timer，本地 Windows 仍是唯一正式采集写入者。
+
+2026-07-16 17:03 Asia/Shanghai 本地增强 `health` 返回 `ok`：SQLite 正常、心跳年龄约 76 秒、完整发现和时钟校验年龄约 23 分钟、191 个未来待办、0 个逾期任务、磁盘正常。
+
 ## 当前阻塞与风险
 
 - 7 天技术验收尚未开始，采集器不能标记为技术通过。
@@ -64,6 +79,9 @@
 - 当前 Codex 进程非管理员，S4U 任务注册被 Windows 拒绝；24 小时验证使用显式 `-Interactive` 回退，30 天验收前必须提升权限重装默认模式。
 - 尚未提供另一物理磁盘或网络备份目录；这不阻止开发和 7 天验证，但阻止 30 天验收通过。
 - 尚未配置 `FOOTBALL_CUPS_OSS_BACKUP_DIR` 并完成 OSS 风格备份恢复；这阻止阿里云正式切换。
+- ECS 当前只有 40 GB 系统盘；根据 D-017，只能用于隔离 smoke，至少 100 GB 数据盘挂载并通过重启验证前不得启用正式 timer。
+- ECS 尚无 swap、Python 3.11、PostgreSQL 17、私有 OSS/RAM Role 和正式环境文件。
+- 云端完整 smoke 尚未执行；当前 HTTP 200 只证明竞彩首页可达。
 - 当前任务只运行 `run-once`，会自动生成自然日日报，但不会自动执行异盘备份；30 天验收前必须补充独立备份调度并完成恢复演练。
 - 杯赛及赛事格式未知的比分不能自动视为 90 分钟赛果。
 - `config/competition-formats.json` 尚未登记当前出现的美职足、欧冠、巴甲、挪超和世界杯赛事格式。
@@ -78,12 +96,14 @@
 - [ ] 确认当前赛事格式，并由 Agent 写入 `config/competition-formats.json`；新赛事出现时继续登记。
 - [ ] 30 天验收前设置 `FOOTBALL_CUPS_BACKUP_DIR`，指向另一物理磁盘或网络路径。
 - [ ] 阿里云迁移前设置 `FOOTBALL_CUPS_OSS_BACKUP_DIR`，执行 `backup-oss` 并恢复到空目录验证。
-- [ ] 采购 ECS 前确认阿里云杭州规格、数据盘、OSS Bucket 和 RAM Role 方案。
+- [ ] 在 ECS 运行 `bootstrap-smoke.sh`，完成系统更新、Python 3.11、2 GiB swap 和隔离 smoke。
+- [ ] 在正式切换前增加至少 100 GB ESSD，人工确认设备后运行数据盘安全脚本并完成重启挂载验证。
+- [ ] 创建杭州私有 OSS Bucket 和最小权限 ECS RAM Role，完成真实上传、重新下载及 SHA-256 恢复。
 - [ ] 长期无人值守前，在提升的 PowerShell 中把采集和数据库导入任务都重装为 S4U 模式。
 
 ## Agent 唯一下一步
 
-在 2026-07-16 19:11 Asia/Shanghai 后运行 `football-cups-collector report-window --start <UTC-start> --end <UTC-end>` 生成精确 24 小时采集评估，完成首日人工抽查，并执行本地 G 盘和 OSS 风格备份恢复验证；通过后再进行阿里云采购和云端 smoke test。
+在已创建的 ECS 上按 `docs/cloud-migration-plan.md` 执行 Ubuntu smoke 基础安装和隔离 `discover + smoke-live`，保持所有云端 timer 禁用并保留 Windows 单写入者。
 
 ## 恢复工作时首先执行
 

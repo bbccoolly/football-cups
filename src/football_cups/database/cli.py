@@ -49,7 +49,19 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(encoding="utf-8")
 
     args = parse_args(argv)
-    config = DatabaseConfig.from_workspace(args.workspace)
+    try:
+        config = DatabaseConfig.from_workspace(args.workspace)
+    except ValueError as exc:
+        print(json_dumps({"status": "invalid", "error": str(exc)}, indent=2))
+        return 2
+    except OSError as exc:
+        print(
+            json_dumps(
+                {"status": "failed", "error_type": type(exc).__name__, "error": str(exc)},
+                indent=2,
+            )
+        )
+        return 1
     try:
         if args.command == "init":
             with connect(config) as connection:

@@ -8,7 +8,7 @@
 
 项目处于“阶段 3：标准化数据库”。项目负责人已授权在采集验证继续运行的同时提前建设 PostgreSQL 可重建分析层；这不代表 24 小时、7 天或 30 天采集验收已经通过。当前仍不开发模型或 Web 产品，也不将验证采集器标记为长期生产可用。
 
-当前进度及唯一下一步见 `docs/project-status.md`。
+当前进度及唯一下一步见 `docs/project-status.md`。阿里云杭州 ECS 已创建，但目前只允许隔离 smoke；数据盘、OSS 和正式切换门禁尚未完成。
 
 ## 文档入口
 
@@ -39,9 +39,11 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\football-cups-collector.exe health --workspace .
 ```
 
-当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。所有运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
+当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。本地默认运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
 
 迁移到阿里云前必须先完成精确窗口报告、备份恢复和云端 smoke test，步骤见 `docs/cloud-migration-plan.md`。
+
+云端正式环境使用 `FOOTBALL_CUPS_REQUIRED_MOUNT=/srv/football-cups` 防止数据盘掉线后写入系统盘；40 GB 系统盘 smoke 使用独立的 `/var/lib/football-cups-smoke/500`，不得启用长期 timer。
 
 ## 标准化数据库
 

@@ -115,6 +115,8 @@ class CollectorService:
         drift = abs((observed - http_date).total_seconds())
         if drift > self.config.clock_drift_limit_seconds:
             if context.startswith("discovery:"):
+                self.state.set_meta("last_clock_drift_at", iso_utc(observed))
+                self.state.set_meta("last_clock_drift_seconds", str(round(drift, 3)))
                 self.emit_quality(
                     "clock_drift",
                     "critical",
@@ -288,8 +290,7 @@ class CollectorService:
 
     def _disk_status(self) -> str:
         usage = shutil.disk_usage(self.config.data_dir)
-        warning = max(int(usage.total * 0.20), 50 * 1024**3)
-        critical = max(int(usage.total * 0.10), 20 * 1024**3)
+        warning, critical = self.config.disk_thresholds(usage.total)
         if usage.free < critical:
             self.emit_quality(
                 "disk_space",

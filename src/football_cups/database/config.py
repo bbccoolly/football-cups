@@ -16,6 +16,8 @@ class DatabaseConfig:
     @classmethod
     def from_workspace(cls, workspace: Path) -> "DatabaseConfig":
         collector = CollectorConfig.from_workspace(workspace)
+        if not collector.required_mount_ready():
+            raise OSError(f"required data mount is unavailable: {collector.required_mount}")
         database_url = os.environ.get("DATABASE_URL", "").strip() or None
         return cls(
             workspace=collector.workspace,

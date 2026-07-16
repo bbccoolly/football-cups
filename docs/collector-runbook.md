@@ -1,6 +1,6 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V1.2
+> 版本：V1.3
 > 更新日期：2026-07-16
 
 ## 1. 安装
@@ -24,10 +24,16 @@ py -3.11 -m venv .venv
 | `FOOTBALL_CUPS_DATA_DIR` | `<workspace>\data\500` |
 | `FOOTBALL_CUPS_BACKUP_DIR` | 无默认值，备份前必须设置 |
 | `FOOTBALL_CUPS_OSS_BACKUP_DIR` | 无默认值，OSS 风格备份前必须设置 |
+| `FOOTBALL_CUPS_REQUIRED_MOUNT` | 无默认值；设置后必须是实际挂载点，否则拒绝创建数据目录 |
 | `COLLECTOR_DISCOVERY_INTERVAL_MINUTES` | `30` |
 | `COLLECTOR_REQUEST_MIN_INTERVAL_SECONDS` | `1.5` |
 | `COLLECTOR_RUN_TIME_BUDGET_SECONDS` | `100` |
 | `COLLECTOR_CLOCK_DRIFT_LIMIT_SECONDS` | `30` |
+| `COLLECTOR_DISK_WARNING_FREE_GB` / `CRITICAL_FREE_GB` | `50` / `20` |
+| `COLLECTOR_DISK_WARNING_FREE_PERCENT` / `CRITICAL_FREE_PERCENT` | `20` / `10` |
+| `COLLECTOR_HEALTH_HEARTBEAT_MAX_AGE_MINUTES` | `10` |
+| `COLLECTOR_HEALTH_DISCOVERY_MAX_AGE_MINUTES` | `45` |
+| `COLLECTOR_HEALTH_CLOCK_MAX_AGE_MINUTES` | `45` |
 
 `.env.example` 中数据库、授权 API 和邮件告警变量是后续阶段占位符，当前验证采集器不读取。
 
@@ -84,6 +90,8 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 
 `run-once` 会在跨日后自动生成上一自然日的日报，但当前 Windows 任务不会自动执行 `backup`。30 天验收前必须另建每日备份任务或执行等价的固定调度，并完成一次恢复验证。
 
+`health` 可能返回 `ok`、`warning` 或 `failed`，退出码分别为 0、1、3。初始化后还没有心跳时返回 `warning`；心跳超过 10 分钟、完整发现或时钟校验超过 45 分钟、SQLite 损坏、严重磁盘不足或必需挂载点缺失时返回 `failed`。
+
 ## 5. 备份
 
 设置指向另一物理磁盘或网络目录的环境变量：
@@ -104,6 +112,8 @@ $env:FOOTBALL_CUPS_OSS_BACKUP_DIR = 'G:\football-cups-oss-layout'
 ```
 
 该命令生成 `objects/sha256/`、`runs/<run-id>/manifest.json` 和 `complete.json`。只有完成标记和 manifest 哈希一致的批次才能用于恢复。
+
+本地 OSS 风格目录只是对象布局暂存区。云端验收必须使用私有 OSS 完成上传、下载到全新空目录，再运行 `verify-oss-backup`；同一磁盘上的目录副本不能称为异机备份。
 
 恢复测试应恢复到临时目录，运行：
 

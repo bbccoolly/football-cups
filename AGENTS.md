@@ -26,6 +26,7 @@
 - 建立 PostgreSQL schema、迁移、JSONL/manifest 可重放导入、质量审计和 as-of 查询。
 - 并行完成 24 小时、7 天和 30 天采集验证。
 - 准备阿里云迁移文档、Linux/systemd 适配、健康检查、精确窗口报告和可恢复备份接口。
+- 在隔离目录执行云端 smoke；正式 Linux timer 必须要求 `/srv/football-cups` 是真实数据盘挂载点。
 
 当前仍禁止：
 
