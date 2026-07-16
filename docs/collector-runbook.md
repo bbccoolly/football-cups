@@ -1,6 +1,6 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V1.1
+> 版本：V1.2
 > 更新日期：2026-07-16
 
 ## 1. 安装
@@ -23,6 +23,7 @@ py -3.11 -m venv .venv
 | `LOG_LEVEL` | `INFO` |
 | `FOOTBALL_CUPS_DATA_DIR` | `<workspace>\data\500` |
 | `FOOTBALL_CUPS_BACKUP_DIR` | 无默认值，备份前必须设置 |
+| `FOOTBALL_CUPS_OSS_BACKUP_DIR` | 无默认值，OSS 风格备份前必须设置 |
 | `COLLECTOR_DISCOVERY_INTERVAL_MINUTES` | `30` |
 | `COLLECTOR_REQUEST_MIN_INTERVAL_SECONDS` | `1.5` |
 | `COLLECTOR_RUN_TIME_BUDGET_SECONDS` | `100` |
@@ -71,7 +72,10 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 ```powershell
 .\.venv\Scripts\football-cups-collector.exe run-once --workspace .
 .\.venv\Scripts\football-cups-collector.exe report-daily --workspace .
+.\.venv\Scripts\football-cups-collector.exe report-window --workspace . --start <RFC3339> --end <RFC3339>
 .\.venv\Scripts\football-cups-collector.exe backup --workspace .
+.\.venv\Scripts\football-cups-collector.exe backup-oss --workspace .
+.\.venv\Scripts\football-cups-collector.exe health --workspace .
 ```
 
 - 每日确认最后心跳、发现轮次、失败、来源缺盘、切点和磁盘。
@@ -90,6 +94,16 @@ $env:FOOTBALL_CUPS_BACKUP_DIR = 'E:\football-cups-backup'
 ```
 
 备份命令使用 SQLite backup API，并增量复制原始 blobs、manifests、normalized、results 和 reports。与数据目录位于同一卷时命令拒绝执行。
+
+迁移阿里云前还应执行 OSS 风格内容寻址备份：
+
+```powershell
+$env:FOOTBALL_CUPS_OSS_BACKUP_DIR = 'G:\football-cups-oss-layout'
+.\.venv\Scripts\football-cups-collector.exe backup-oss --workspace .
+.\.venv\Scripts\football-cups-collector.exe verify-oss-backup --workspace . --run-id <run-id> --target G:\football-cups-restore-test
+```
+
+该命令生成 `objects/sha256/`、`runs/<run-id>/manifest.json` 和 `complete.json`。只有完成标记和 manifest 哈希一致的批次才能用于恢复。
 
 恢复测试应恢复到临时目录，运行：
 

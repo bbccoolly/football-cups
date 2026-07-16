@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from football_cups.collector.config import CollectorConfig
+from football_cups.collector.backup import run_oss_backup, verify_oss_backup
 from football_cups.collector.http import ObservedResponse
 from football_cups.collector.state import StateStore
 from football_cups.collector.storage import DataStore
@@ -15,6 +16,7 @@ def config_for(tmp_path):
         workspace=tmp_path,
         data_dir=tmp_path / "data" / "500",
         backup_dir=None,
+        oss_backup_dir=None,
     )
 
 
@@ -112,3 +114,26 @@ def test_state_rebuild_uses_discovery_file_facts(tmp_path) -> None:
     assert result["previous_state_backup"] is not None
     with StateStore(config) as state:
         assert state.all_fixtures()[0]["fixture_id"] == "123"
+
+
+def test_oss_backup_requires_complete_marker_and_restores_hashes(tmp_path) -> None:
+    config = CollectorConfig(
+        workspace=tmp_path,
+        data_dir=tmp_path / "data" / "500",
+        backup_dir=None,
+        oss_backup_dir=tmp_path / "oss",
+    )
+    store = DataStore(config)
+    now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    store.write_manifest("test", "run-one", {"value": 1}, now)
+    with StateStore(config):
+        pass
+
+    result = run_oss_backup(config, now=now)
+    restored = tmp_path / "restored"
+    verified = verify_oss_backup(config, run_id=result["run_id"], target=restored)
+
+    assert result["file_count"] >= 2
+    assert verified["file_count"] == result["file_count"]
+    assert (restored / "manifests" / "2026" / "07" / "15" / "run-one-test.json").is_file()
+    assert (restored / "state" / "collector.sqlite3").is_file()

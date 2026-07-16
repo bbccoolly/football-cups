@@ -1,0 +1,21 @@
+[Unit]
+Description=Football Cups 500 collector run-once
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=football-cups
+Group=football-cups
+WorkingDirectory=/opt/football-cups
+EnvironmentFile=-/etc/football-cups/collector.env
+ExecStart=/opt/football-cups/.venv/bin/football-cups-collector run-once --workspace /opt/football-cups
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=300
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+RestartPreventExitStatus=2 3
+
+[Install]
+WantedBy=multi-user.target

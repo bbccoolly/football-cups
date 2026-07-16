@@ -86,6 +86,105 @@ def build_daily_report(
     }
 
 
+def build_window_report(
+    config: CollectorConfig,
+    state: StateStore,
+    start: datetime,
+    end: datetime,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    generated = generated_at or utc_now()
+    events = state.events_for_range(start, end)
+    runs = state.runs_for_range(start, end)
+    event_counts = Counter((event["event_type"], event["status"]) for event in events)
+    cutoff_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    market_by_competition: dict[str, Counter[str]] = defaultdict(Counter)
+    for event in events:
+        if event["event_type"] == "snapshot_batch":
+            cutoff_counts[event.get("cutoff") or "unknown"][event["status"]] += 1
+        if event["event_type"] == "market_capture":
+            market_by_competition[event.get("competition") or "unknown"][event["status"]] += 1
+
+    full_discovery = event_counts[("discovery_poll", "full")]
+    partial_discovery = event_counts[("discovery_poll", "partial")]
+    http_success = event_counts[("http_request", "success")]
+    http_failure = event_counts[("http_request", "failure")]
+    parser_success = event_counts[("parser", "success")]
+    parser_failure = event_counts[("parser", "failure")]
+    result_success = event_counts[("result_candidate", "success")]
+    result_missing = event_counts[("result_candidate", "missing")]
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "record_type": "WindowQualityReport",
+        "start": iso_utc(start),
+        "end": iso_utc(end),
+        "generated_at": iso_utc(generated),
+        "timezone": config.timezone_name,
+        "last_heartbeat": state.get_meta("last_heartbeat_at"),
+        "runs": {
+            "total": len(runs),
+            "by_status": dict(Counter(run["status"] for run in runs)),
+        },
+        "metrics": {
+            "discovery_full_success_rate": _ratio(
+                full_discovery, full_discovery + partial_discovery
+            ),
+            "http_acquisition_success_rate": _ratio(
+                http_success, http_success + http_failure
+            ),
+            "parser_success_rate": _ratio(parser_success, parser_success + parser_failure),
+            "result_candidate_coverage": _ratio(
+                result_success, result_success + result_missing
+            ),
+        },
+        "event_counts": {
+            f"{kind}:{status}": count for (kind, status), count in sorted(event_counts.items())
+        },
+        "market_by_competition": {
+            key: dict(value) for key, value in sorted(market_by_competition.items())
+        },
+        "cutoff_status": {key: dict(value) for key, value in sorted(cutoff_counts.items())},
+    }
+
+
+def write_window_report(
+    config: CollectorConfig,
+    state: StateStore,
+    data_store: DataStore,
+    start: datetime,
+    end: datetime,
+) -> tuple[Path, Path, dict[str, Any]]:
+    generated = utc_now()
+    report = build_window_report(config, state, start, end, generated_at=generated)
+    run_id = make_run_id(generated)
+    folder = config.data_dir / "reports" / "windows" / generated.strftime("%Y") / generated.strftime("%m")
+    json_path = folder / f"{run_id}.json"
+    md_path = folder / f"{run_id}.md"
+    data_store._atomic_write(json_path, (json_dumps(report, indent=2) + "\n").encode("utf-8"))
+    metrics = report["metrics"]
+    lines = [
+        "# 500 采集精确窗口报告",
+        "",
+        f"- 窗口开始：{report['start']}",
+        f"- 窗口结束：{report['end']}",
+        f"- 生成时间：{report['generated_at']}",
+        f"- 最后心跳：{report['last_heartbeat'] or '无'}",
+        f"- 运行次数：{report['runs']['total']}",
+        f"- 完整发现成功率：{metrics['discovery_full_success_rate']}",
+        f"- HTTP 成功率：{metrics['http_acquisition_success_rate']}",
+        f"- 解析成功率：{metrics['parser_success_rate']}",
+        f"- 候选赛果覆盖率：{metrics['result_candidate_coverage']}",
+        "",
+        "## 事件",
+        "",
+    ]
+    lines.extend(f"- `{key}`：{value}" for key, value in report["event_counts"].items())
+    data_store._atomic_write(md_path, ("\n".join(lines) + "\n").encode("utf-8"))
+    return json_path, md_path, report
+
+
 def write_daily_report(
     config: CollectorConfig,
     state: StateStore,
@@ -117,4 +216,3 @@ def write_daily_report(
     lines.extend(f"- `{key}`：{value}" for key, value in report["event_counts"].items())
     data_store._atomic_write(md_path, ("\n".join(lines) + "\n").encode("utf-8"))
     return json_path, md_path, report
-

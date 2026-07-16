@@ -8,7 +8,7 @@ import pandas as pd
 
 from football_cups.collector.config import CollectorConfig
 from football_cups.collector.markets import parse_market_workbook
-from football_cups.collector.reporting import build_daily_report, day_bounds
+from football_cups.collector.reporting import build_daily_report, build_window_report, day_bounds
 from football_cups.collector.state import StateStore
 from football_cups.collector.service import CollectorService
 from football_cups.collector.timeutil import iso_utc
@@ -19,6 +19,7 @@ def config_for(tmp_path):
         workspace=tmp_path,
         data_dir=tmp_path / "data" / "500",
         backup_dir=None,
+        oss_backup_dir=None,
     )
 
 
@@ -65,6 +66,21 @@ def test_daily_report_keeps_failure_denominators_separate(tmp_path) -> None:
     assert report["metrics"]["discovery_full_success_rate"] == 1.0
     assert report["metrics"]["http_acquisition_success_rate"] == 1.0
     assert report["event_counts"]["market_capture:source_market_unavailable"] == 1
+
+
+def test_window_report_uses_exact_bounds(tmp_path) -> None:
+    config = config_for(tmp_path)
+    start = datetime(2026, 7, 15, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=24)
+    with StateStore(config) as state:
+        state.add_event("discovery_poll", "full", {}, occurred_at=start - timedelta(seconds=1))
+        state.add_event("discovery_poll", "full", {}, occurred_at=start)
+        state.add_event("discovery_poll", "partial", {}, occurred_at=end - timedelta(seconds=1))
+        state.add_event("discovery_poll", "partial", {}, occurred_at=end)
+        report = build_window_report(config, state, start, end, generated_at=end)
+    assert report["metrics"]["discovery_full_success_rate"] == 0.5
+    assert report["event_counts"]["discovery_poll:full"] == 1
+    assert report["event_counts"]["discovery_poll:partial"] == 1
 
 
 def test_cached_market_date_uses_recent_discovery_clock_check(tmp_path) -> None:

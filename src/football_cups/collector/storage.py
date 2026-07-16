@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -15,6 +16,11 @@ from . import SCHEMA_VERSION
 from .config import CollectorConfig
 from .http import ObservedResponse
 from .timeutil import iso_utc, utc_now
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - dependency is declared, fallback keeps CLI importable.
+    psutil = None
 
 
 def make_run_id(now: datetime | None = None) -> str:
@@ -53,18 +59,60 @@ class SingleInstanceLock:
     stale_after: timedelta = timedelta(minutes=30)
     acquired: bool = False
 
+    def _current_payload(self, now: datetime) -> dict[str, Any]:
+        create_time: float | None = None
+        boot_time: float | None = None
+        if psutil is not None:
+            process = psutil.Process(os.getpid())
+            create_time = process.create_time()
+            boot_time = psutil.boot_time()
+        return {
+            "hostname": socket.gethostname(),
+            "boot_time": boot_time,
+            "pid": os.getpid(),
+            "process_create_time": create_time,
+            "acquired_at": iso_utc(now),
+        }
+
+    def _active_owner_exists(self, payload: dict[str, Any]) -> bool:
+        if psutil is None or payload.get("hostname") != socket.gethostname():
+            return False
+        boot_time = payload.get("boot_time")
+        if boot_time is not None and abs(float(boot_time) - psutil.boot_time()) > 1:
+            return False
+        pid = payload.get("pid")
+        create_time = payload.get("process_create_time")
+        if not isinstance(pid, int) or not psutil.pid_exists(pid):
+            return False
+        if create_time is None:
+            return True
+        try:
+            return abs(psutil.Process(pid).create_time() - float(create_time)) < 0.01
+        except (psutil.Error, ValueError, TypeError):
+            return False
+
+    def _existing_lock_is_protected(self, now: datetime) -> bool:
+        try:
+            raw_payload = self.path.read_text(encoding="utf-8")
+            payload = json.loads(raw_payload)
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if self._active_owner_exists(payload):
+            return True
+        try:
+            age = now - datetime.fromtimestamp(self.path.stat().st_mtime, tz=now.tzinfo)
+        except OSError:
+            return True
+        return age <= self.stale_after
+
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         now = utc_now()
-        payload = {"pid": os.getpid(), "acquired_at": iso_utc(now)}
+        payload = self._current_payload(now)
         try:
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError:
-            try:
-                age = now - datetime.fromtimestamp(self.path.stat().st_mtime, tz=now.tzinfo)
-            except OSError:
-                return False
-            if age <= self.stale_after:
+            if self._existing_lock_is_protected(now):
                 return False
             try:
                 self.path.unlink()
@@ -182,4 +230,3 @@ class DataStore:
         if not path.exists():
             self._atomic_write(path, (json_dumps(record, indent=2) + "\n").encode("utf-8"))
         return path
-

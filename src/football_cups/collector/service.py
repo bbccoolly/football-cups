@@ -619,6 +619,66 @@ class CollectorService:
             )
         return (2 if conflicts else 0), {"imported": len(imported), "conflicts": conflicts}
 
+    def smoke_live(self, *, active_fixture_id: str, completed_fixture_id: str) -> tuple[int, dict[str, Any]]:
+        fixture = {"fixture_id": active_fixture_id, "kickoff_at": None}
+        market_results: dict[str, Any] = {}
+        exit_code = 0
+        for market in MARKETS:
+            capture = self.markets.collect(fixture, market, "smoke_live")
+            for blob in capture.raw_blobs:
+                self._observe_http(blob, context=f"smoke:{market}")
+            market_results[market] = {
+                "status": capture.status,
+                "error_type": capture.error_type,
+                "error": capture.error,
+                "raw_blob_count": len(capture.raw_blobs),
+                "row_count": capture.snapshot["row_count"] if capture.snapshot else 0,
+            }
+            if market in CORE_MARKETS and capture.status != "success":
+                exit_code = 1
+
+        result_checks: dict[str, Any] = {"completed_page": None, "analysis_page": None}
+        try:
+            completed_response = self.http.request("GET", COMPLETED_URL)
+            completed_blob = self.data.store_response(completed_response, default_extension="html")
+            self._observe_http(completed_blob, context="smoke:results:completed")
+            completed_scores = (
+                parse_completed_page(completed_response.content, {completed_fixture_id})
+                if completed_response.ok
+                else {}
+            )
+            result_checks["completed_page"] = {
+                "status": "success" if completed_fixture_id in completed_scores else "missing",
+                "http_status": completed_response.status_code,
+                "raw_blob": completed_blob,
+            }
+            if completed_fixture_id not in completed_scores:
+                exit_code = 1
+
+            analysis_url = f"https://odds.500.com/fenxi/shuju-{completed_fixture_id}.shtml"
+            analysis_response = self.http.request("GET", analysis_url)
+            analysis_blob = self.data.store_response(analysis_response, default_extension="html")
+            self._observe_http(analysis_blob, context="smoke:results:analysis")
+            analysis = parse_analysis_page(analysis_response.content, completed_fixture_id) if analysis_response.ok else None
+            result_checks["analysis_page"] = {
+                "status": "success" if analysis else "missing",
+                "http_status": analysis_response.status_code,
+                "raw_blob": analysis_blob,
+            }
+            if analysis is None:
+                exit_code = 1
+        except CollectorHttpError as exc:
+            result_checks["error"] = str(exc)
+            exit_code = 1
+
+        return exit_code, {
+            "status": "success" if exit_code == 0 else "partial",
+            "active_fixture_id": active_fixture_id,
+            "completed_fixture_id": completed_fixture_id,
+            "markets": market_results,
+            "results": result_checks,
+        }
+
 
 def rebuild_state(config: CollectorConfig) -> dict[str, Any]:
     state_path = config.state_path

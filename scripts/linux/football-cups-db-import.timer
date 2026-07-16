@@ -1,0 +1,12 @@
+[Unit]
+Description=Import Football Cups JSONL into PostgreSQL every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=football-cups-db-import.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

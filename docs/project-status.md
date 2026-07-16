@@ -30,10 +30,16 @@
 - [x] 完成首次导入、重复导入和独立空库全量重建；最终空库重建为 81 个 manifest、17,252 条记录、0 个未知类型。
 - [x] 完成损坏文件回滚、并发锁和 as-of 截止后零越界验证，真实集成测试 30 项通过。
 - [x] 安装 `FootballCups-Database-Import` 交互式任务，每 5 分钟增量导入，首次任务结果为 0。
+- [x] 记录 D-016，确定阿里云杭州单机 ECS 迁移准备路线。
+- [x] 新增 `docs/cloud-migration-plan.md`，同步迁移前硬门槛、OSS 备份契约、systemd 运行和回滚规则。
+- [x] 新增迁移准备命令接口：`report-window`、`health`、`backup-oss`、`verify-oss-backup` 和 `smoke-live`。
+- [x] 新增 Linux systemd 采集与数据库导入 timer 模板。
 
 ## 当前目标
 
 保持采集和数据库导入任务连续运行，完成 24 小时及后续采集验证、赛事格式登记和 90 分钟赛果闭环。阶段 4 仍需至少 500 场严格快照及已验证赛果，当前不得开始模型。
+
+同时准备阿里云迁移，但正式切换前必须先完成精确 24 小时窗口报告、人工抽查、备份恢复和云端 smoke test。云端切换后 7 天和 30 天验收重新计时。
 
 ## 当前运行证据
 
@@ -57,6 +63,7 @@
 - 本地 Windows 长期运行需要人工保证联网、不休眠和系统时间准确。
 - 当前 Codex 进程非管理员，S4U 任务注册被 Windows 拒绝；24 小时验证使用显式 `-Interactive` 回退，30 天验收前必须提升权限重装默认模式。
 - 尚未提供另一物理磁盘或网络备份目录；这不阻止开发和 7 天验证，但阻止 30 天验收通过。
+- 尚未配置 `FOOTBALL_CUPS_OSS_BACKUP_DIR` 并完成 OSS 风格备份恢复；这阻止阿里云正式切换。
 - 当前任务只运行 `run-once`，会自动生成自然日日报，但不会自动执行异盘备份；30 天验收前必须补充独立备份调度并完成恢复演练。
 - 杯赛及赛事格式未知的比分不能自动视为 90 分钟赛果。
 - `config/competition-formats.json` 尚未登记当前出现的美职足、欧冠、巴甲、挪超和世界杯赛事格式。
@@ -70,11 +77,13 @@
 - [ ] 确认 Windows 在验证期间不休眠、保持登录并保持网络连接。
 - [ ] 确认当前赛事格式，并由 Agent 写入 `config/competition-formats.json`；新赛事出现时继续登记。
 - [ ] 30 天验收前设置 `FOOTBALL_CUPS_BACKUP_DIR`，指向另一物理磁盘或网络路径。
+- [ ] 阿里云迁移前设置 `FOOTBALL_CUPS_OSS_BACKUP_DIR`，执行 `backup-oss` 并恢复到空目录验证。
+- [ ] 采购 ECS 前确认阿里云杭州规格、数据盘、OSS Bucket 和 RAM Role 方案。
 - [ ] 长期无人值守前，在提升的 PowerShell 中把采集和数据库导入任务都重装为 S4U 模式。
 
 ## Agent 唯一下一步
 
-在 2026-07-16 19:11 Asia/Shanghai 后完成精确 24 小时采集评估和首日人工抽查，同时确认数据库导入任务无空窗；之后继续赛果闭环和严格样本积累，不提前开发模型。
+在 2026-07-16 19:11 Asia/Shanghai 后运行 `football-cups-collector report-window --start <UTC-start> --end <UTC-end>` 生成精确 24 小时采集评估，完成首日人工抽查，并执行本地 G 盘和 OSS 风格备份恢复验证；通过后再进行阿里云采购和云端 smoke test。
 
 ## 恢复工作时首先执行
 

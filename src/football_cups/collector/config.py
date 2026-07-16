@@ -58,6 +58,7 @@ class CollectorConfig:
     workspace: Path
     data_dir: Path
     backup_dir: Path | None
+    oss_backup_dir: Path | None
     timezone_name: str = "Asia/Shanghai"
     discovery_interval_minutes: int = 30
     request_min_interval_seconds: float = 1.5
@@ -73,10 +74,12 @@ class CollectorConfig:
         _load_dotenv(workspace / ".env")
         data_value = os.environ.get("FOOTBALL_CUPS_DATA_DIR", "").strip()
         backup_value = os.environ.get("FOOTBALL_CUPS_BACKUP_DIR", "").strip()
+        oss_backup_value = os.environ.get("FOOTBALL_CUPS_OSS_BACKUP_DIR", "").strip()
         return cls(
             workspace=workspace,
             data_dir=(Path(data_value).expanduser().resolve() if data_value else workspace / "data" / "500"),
             backup_dir=Path(backup_value).expanduser().resolve() if backup_value else None,
+            oss_backup_dir=Path(oss_backup_value).expanduser().resolve() if oss_backup_value else None,
             timezone_name=os.environ.get("APP_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
             discovery_interval_minutes=_env_int("COLLECTOR_DISCOVERY_INTERVAL_MINUTES", 30),
             request_min_interval_seconds=_env_float("COLLECTOR_REQUEST_MIN_INTERVAL_SECONDS", 1.5),
@@ -106,4 +109,3 @@ class CollectorConfig:
             "logs",
         ):
             (self.data_dir / relative).mkdir(parents=True, exist_ok=True)
-

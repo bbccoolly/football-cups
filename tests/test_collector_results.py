@@ -33,6 +33,7 @@ def config_for(tmp_path):
         workspace=tmp_path,
         data_dir=tmp_path / "data" / "500",
         backup_dir=None,
+        oss_backup_dir=None,
     )
 
 

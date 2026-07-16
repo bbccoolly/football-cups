@@ -396,6 +396,9 @@ class StateStore:
         return [dict(row) | {"identity": json.loads(row["identity_json"])} for row in rows]
 
     def events_for_day(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return self.events_for_range(start, end)
+
+    def events_for_range(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT * FROM events WHERE occurred_at>=? AND occurred_at<? ORDER BY occurred_at",
             (iso_utc(start), iso_utc(end)),
@@ -403,6 +406,9 @@ class StateStore:
         return [dict(row) | {"details": json.loads(row["details_json"])} for row in rows]
 
     def runs_for_day(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return self.runs_for_range(start, end)
+
+    def runs_for_range(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT * FROM runs WHERE started_at>=? AND started_at<? ORDER BY started_at",
             (iso_utc(start), iso_utc(end)),

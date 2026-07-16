@@ -25,6 +25,7 @@
 - 使用 SQLite 保存可重建的采集调度状态。
 - 建立 PostgreSQL schema、迁移、JSONL/manifest 可重放导入、质量审计和 as-of 查询。
 - 并行完成 24 小时、7 天和 30 天采集验证。
+- 准备阿里云迁移文档、Linux/systemd 适配、健康检查、精确窗口报告和可恢复备份接口。
 
 当前仍禁止：
 
@@ -84,6 +85,7 @@ Agent 负责：
 - `docs/collector-runbook.md`：本地运行、备份和恢复操作。
 - `docs/database-design.md`：PostgreSQL schema、导入和 as-of 查询契约。
 - `docs/database-runbook.md`：本地 PostgreSQL 安装、迁移、重放和恢复操作。
+- `docs/cloud-migration-plan.md`：阿里云 ECS 迁移准备、备份、切换和回滚规则。
 
 ## 7. 每次任务的完成条件
 

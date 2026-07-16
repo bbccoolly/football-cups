@@ -22,6 +22,7 @@
 - `docs/collector-runbook.md`：Windows 运行、备份和恢复手册
 - `docs/database-design.md`：PostgreSQL 数据模型和防泄漏查询契约
 - `docs/database-runbook.md`：数据库安装、迁移、导入和恢复手册
+- `docs/cloud-migration-plan.md`：阿里云迁移前准备、备份、切换和回滚计划
 - `docs/research-data-acquisition-plan.md`：历史免费研究路线及已有结果
 
 ## 采集器
@@ -35,9 +36,12 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\football-cups-collector.exe init --workspace .
 .\.venv\Scripts\football-cups-collector.exe discover --workspace .
 .\.venv\Scripts\football-cups-collector.exe run-once --workspace .
+.\.venv\Scripts\football-cups-collector.exe health --workspace .
 ```
 
 当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。所有运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
+
+迁移到阿里云前必须先完成精确窗口报告、备份恢复和云端 smoke test，步骤见 `docs/cloud-migration-plan.md`。
 
 ## 标准化数据库
 
