@@ -40,6 +40,9 @@
 - [x] 增加 Ubuntu smoke、数据盘安全准备、systemd 安装和 OSS 往返校验脚本。
 - [x] 云迁移 V1.1 改动通过 45 项测试，包含真实隔离 PostgreSQL 集成测试；Bash 语法和文档链接检查通过。
 - [x] ECS 完成 Ubuntu 软件包更新、Python 3.11.15、2 GiB swap 和 `football-cups` 服务用户初始化；系统未要求重启。
+- [x] ECS fast-forward 到发布提交 `7395407`，完成 Python 3.11 虚拟环境、无密钥 smoke 配置和只读代码权限；云端离线测试 45 项通过、1 项 PostgreSQL 集成测试按预期跳过。
+- [x] ECS 隔离发现 smoke 通过：六个竞彩页面全部成功、每页 20 场、正则与 DOM 清单一致、0 身份冲突。
+- [x] ECS 四市场与赛果 smoke 通过：欧赔 56 行、亚盘 7 行、大小球 5 行、让球指数 29 行，完场页与分析页均成功。
 
 ## 当前目标
 
@@ -59,14 +62,17 @@
 
 以上是未满 24 小时的中期证据，不是验收结论。自然日质量日报包含验证开始前的 smoke test，不得代替精确的 24 小时窗口统计。
 
-截至 2026-07-16 17:18 Asia/Shanghai 的 ECS 基础证据：
+截至 2026-07-16 18:07 Asia/Shanghai 的 ECS smoke 证据：
 
 - Ubuntu 22.04.5、2 vCPU / 4 GiB、40 GB 系统盘约 35 GB 可用，仍无数据盘。
 - NTP 已同步，时区为 Asia/Shanghai。
 - 已安装 Python 3.11.15，2 GiB `/swapfile` 已启用，`football-cups` 系统用户存在。
 - 已更新 53 个 Ubuntu 软件包；`cloud-init` 保持暂缓更新，系统未生成 `/var/run/reboot-required`。
-- ECS 仓库已核对发布提交 `f5872b5`；权限小修复 `ac6db46` 已发布，等待 ECS 执行 fast-forward 拉取。
-- ECS 访问 500 竞彩首页返回 HTTP 200；尚未执行六页面、四市场、完场页和分析页完整 smoke。
+- ECS 仓库已 fast-forward 并核对发布提交 `7395407`，Git 工作区干净；服务用户不能写入代码目录。
+- 云端离线测试结果为 45 passed、1 skipped；跳过项是当前未安装 PostgreSQL 时的集成测试。
+- 六个发现页面均 HTTP 200，全部返回同一组 20 场比赛，正则与 DOM 清单一致且无身份冲突。
+- 活跃 fixture `1363485` 的四市场全部成功；完场 fixture `1438672` 的完场页和分析页均成功。
+- smoke 日报显示发现、HTTP 获取和解析成功率均为 100%；隔离数据约 4.5 MB，14 个 blob，健康状态仅因未运行 `run-once` 缺少心跳而为 `warning`。
 - 当前没有启用云端 systemd timer，本地 Windows 仍是唯一正式采集写入者。
 
 2026-07-16 17:03 Asia/Shanghai 本地增强 `health` 返回 `ok`：SQLite 正常、心跳年龄约 76 秒、完整发现和时钟校验年龄约 23 分钟、191 个未来待办、0 个逾期任务、磁盘正常。
@@ -83,8 +89,8 @@
 - 尚未提供另一物理磁盘或网络备份目录；这不阻止开发和 7 天验证，但阻止 30 天验收通过。
 - 尚未配置 `FOOTBALL_CUPS_OSS_BACKUP_DIR` 并完成 OSS 风格备份恢复；这阻止阿里云正式切换。
 - ECS 当前只有 40 GB 系统盘；根据 D-017，只能用于隔离 smoke，至少 100 GB 数据盘挂载并通过重启验证前不得启用正式 timer。
-- ECS 尚未安装项目虚拟环境、smoke 配置、PostgreSQL 17、私有 OSS/RAM Role 和正式环境文件。
-- 云端完整 smoke 尚未执行；当前 HTTP 200 只证明竞彩首页可达。
+- ECS 尚未安装 PostgreSQL 17、私有 OSS/RAM Role 和正式环境文件；这些工作必须等待正式数据盘。
+- ECS smoke 健康状态为 `warning`，唯一原因是隔离环境未执行正式 `run-once`，因而没有心跳；这不等于正式运行健康验收通过。
 - 当前任务只运行 `run-once`，会自动生成自然日日报，但不会自动执行异盘备份；30 天验收前必须补充独立备份调度并完成恢复演练。
 - 杯赛及赛事格式未知的比分不能自动视为 90 分钟赛果。
 - `config/competition-formats.json` 尚未登记当前出现的美职足、欧冠、巴甲、挪超和世界杯赛事格式。
@@ -99,14 +105,14 @@
 - [ ] 确认当前赛事格式，并由 Agent 写入 `config/competition-formats.json`；新赛事出现时继续登记。
 - [ ] 30 天验收前设置 `FOOTBALL_CUPS_BACKUP_DIR`，指向另一物理磁盘或网络路径。
 - [ ] 阿里云迁移前设置 `FOOTBALL_CUPS_OSS_BACKUP_DIR`，执行 `backup-oss` 并恢复到空目录验证。
-- [ ] 在 ECS 安装项目虚拟环境和无密钥 smoke 配置，完成隔离 `discover + smoke-live`。
+- [x] 在 ECS 安装项目虚拟环境和无密钥 smoke 配置，完成隔离 `discover + smoke-live`。
 - [ ] 在正式切换前增加至少 100 GB ESSD，人工确认设备后运行数据盘安全脚本并完成重启挂载验证。
 - [ ] 创建杭州私有 OSS Bucket 和最小权限 ECS RAM Role，完成真实上传、重新下载及 SHA-256 恢复。
 - [ ] 长期无人值守前，在提升的 PowerShell 中把采集和数据库导入任务都重装为 S4U 模式。
 
 ## Agent 唯一下一步
 
-在 ECS fast-forward 到 `ac6db46`，安装项目虚拟环境和无密钥 smoke 配置，然后使用已验证的活跃 fixture `1363485` 与完场 fixture `1438672` 执行隔离 `discover + smoke-live`；保持所有云端 timer 禁用并保留 Windows 单写入者。
+在阿里云为 ECS 增加至少 100 GB ESSD 数据盘；先使用 `lsblk` 和序列号人工确认设备身份，再预演 `scripts/linux/prepare-data-disk.sh`。确认数据盘前保持所有云端 timer 禁用并保留 Windows 单写入者。
 
 ## 恢复工作时首先执行
 
