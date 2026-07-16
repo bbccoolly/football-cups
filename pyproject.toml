@@ -11,6 +11,7 @@ dependencies = [
   "lxml>=5.0",
   "openpyxl>=3.1",
   "pandas>=2.2",
+  "psycopg[binary]>=3.2,<4",
   "requests>=2.31",
   "xlrd>=2.0",
 ]
@@ -20,12 +21,16 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 football-cups-collector = "football_cups.collector.cli:main"
+football-cups-db = "football_cups.database.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"football_cups.database" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

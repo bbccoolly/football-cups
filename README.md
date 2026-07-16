@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-项目处于“阶段 1：500 竞彩全赛事发现与技术验收”。当前允许运行验证采集器；7 天技术验收前不宣称技术通过，30 天稳定性验收前不进入正式分析数据库、模型或 Web 产品阶段，也不将采集器标记为长期生产可用。
+项目处于“阶段 3：标准化数据库”。项目负责人已授权在采集验证继续运行的同时提前建设 PostgreSQL 可重建分析层；这不代表 24 小时、7 天或 30 天采集验收已经通过。当前仍不开发模型或 Web 产品，也不将验证采集器标记为长期生产可用。
 
 当前进度及唯一下一步见 `docs/project-status.md`。
 
@@ -20,6 +20,8 @@
 - `docs/data-source-evaluation.md`：500 技术验收记录
 - `docs/500-collector-spec.md`：采集器数据契约和行为规范
 - `docs/collector-runbook.md`：Windows 运行、备份和恢复手册
+- `docs/database-design.md`：PostgreSQL 数据模型和防泄漏查询契约
+- `docs/database-runbook.md`：数据库安装、迁移、导入和恢复手册
 - `docs/research-data-acquisition-plan.md`：历史免费研究路线及已有结果
 
 ## 采集器
@@ -36,6 +38,19 @@ py -3.11 -m venv .venv
 ```
 
 当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。所有运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
+
+## 标准化数据库
+
+本地 PostgreSQL 程序、数据和日志默认全部位于 D 盘的 `data/` 下：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgres.ps1 -Action Install -Workspace .
+.\.venv\Scripts\football-cups-db.exe init --workspace .
+.\.venv\Scripts\football-cups-db.exe import-files --workspace .
+.\.venv\Scripts\football-cups-db.exe status --workspace .
+```
+
+数据库是可重建分析层，不能替代原始 blob、manifest 和 JSONL。完整操作见 `docs/database-runbook.md`。
 
 ## 安全提示
 
