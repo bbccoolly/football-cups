@@ -1,7 +1,7 @@
 # 阿里云杭州迁移与运行计划
 
 > 版本：V1.1
-> 状态：ECS 隔离 smoke 已通过，等待正式数据盘
+> 状态：ECS 隔离 smoke 已通过；根据 D-018 暂停正式迁移
 > 更新日期：2026-07-16
 
 本文是从本地 Windows 验证环境迁移到阿里云 ECS 的权威操作文档。迁移不改变产品、数据和模型门禁；未满足正式切换条件时不得停止 Windows 采集，也不得启用云端长期 timer。
@@ -21,7 +21,7 @@
 | Python | 系统 3.10.12；项目 Python 3.11.15 已安装 |
 | 网络 | NTP 正常；500 竞彩首页 HTTP 200 |
 
-本地约 22 小时形成 54.3 MB 文件事实，粗略折算约 21 GB/年，尚未计入赛事高峰和 PostgreSQL。40 GB 系统盘只能承载系统、代码、虚拟环境、swap、受控日志和隔离 smoke；正式 timer 启用前必须增加至少 100 GB ESSD 数据盘。
+本地约 22 小时形成 54.3 MB 文件事实，粗略折算约 21 GB/年，尚未计入赛事高峰和 PostgreSQL。40 GB 系统盘只能承载系统、代码、虚拟环境、swap、受控日志和隔离 smoke；正式 timer 启用前必须增加至少 100 GB ESSD 数据盘。根据 D-018，当前暂缓购买数据盘并暂停正式迁移，Windows 本地继续作为唯一正式采集写入者。
 
 Ubuntu 22.04 可用于当前阶段，但应在 2027-03-31 前完成 Ubuntu 24.04/Python 3.12 迁移或另行登记维护决策。
 
@@ -150,7 +150,9 @@ sudo -u football-cups /opt/football-cups/.venv/bin/football-cups-collector repor
 
 活跃 fixture 从最新完整 DiscoveryRun 中选择；完场 fixture 必须仍能同时出现在完场页和分析页。通过条件：六页面全部成功、正则与 DOM 清单一致、三个核心市场成功、让球指数有明确分类、完场页和分析页均取得目标比分证据、所有请求均有 blob/manifest。仅访问竞彩首页不算完整 smoke。
 
-## 7. 数据盘准备
+## 7. 数据盘准备（暂停）
+
+根据 D-018，当前不购买或挂载正式数据盘，本节仅在未来重新启动云端正式迁移时执行。暂停期间不得在 40 GB 系统盘上创建 `/srv/football-cups` 正式事实层、PostgreSQL 数据目录或长期 timer。
 
 在阿里云控制台增加至少 100 GB ESSD 后，先人工核对 `lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,SERIAL`。禁止根据经验假设设备名。
 
