@@ -16,9 +16,6 @@ if (-not (Test-Path -LiteralPath $databaseCli)) {
 }
 
 & $postgresScript -Action Start -Workspace $workspacePath | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    exit 1
-}
 
 & $databaseCli import-files --workspace $workspacePath
 exit $LASTEXITCODE
