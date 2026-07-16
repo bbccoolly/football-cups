@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-项目处于“阶段 1：500 竞彩全赛事发现与技术验收”。当前允许运行验证采集器；7 天技术验收前不开发正式分析数据库、模型或 Web 产品，30 天稳定性验收前不将采集器标记为长期生产可用。
+项目处于“阶段 1：500 竞彩全赛事发现与技术验收”。当前允许运行验证采集器；7 天技术验收前不宣称技术通过，30 天稳定性验收前不进入正式分析数据库、模型或 Web 产品阶段，也不将采集器标记为长期生产可用。
 
 当前进度及唯一下一步见 `docs/project-status.md`。
 
@@ -27,13 +27,15 @@
 安装开发环境后可运行：
 
 ```powershell
-py -3.14 -m pip install -e .[dev]
-football-cups-collector init --workspace .
-football-cups-collector discover --workspace .
-football-cups-collector run-once --workspace .
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\football-cups-collector.exe init --workspace .
+.\.venv\Scripts\football-cups-collector.exe discover --workspace .
+.\.venv\Scripts\football-cups-collector.exe run-once --workspace .
 ```
 
-所有运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
+当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。所有运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
 
 ## 安全提示
 

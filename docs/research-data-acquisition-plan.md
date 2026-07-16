@@ -57,18 +57,18 @@ data/research/
 
 ## 5. 环境准备
 
-当前本机可用 Python 包括 Python 3.14 和 Python 3.11；OddsHarvester `0.4.0` 要求 Python `>=3.12`，优先使用 Python 3.14。
+截至 2026-07-15，本机可用 Python 包括 Python 3.14 和 Python 3.11；主采集器固定使用根目录 `.venv` 的 Python 3.11。OddsHarvester `0.4.0` 要求 Python `>=3.12`，研究路线单独使用 `data/research/runtime/venv-py314`，不得覆盖主采集器环境。
 
 建议命令：
 
 ```powershell
-py -3.14 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install oddsharvester==0.4.0
-.\.venv\Scripts\python.exe -m playwright install chromium
+py -3.14 -m venv data\research\runtime\venv-py314
+data\research\runtime\venv-py314\Scripts\python.exe -m pip install --upgrade pip
+data\research\runtime\venv-py314\Scripts\python.exe -m pip install oddsharvester==0.4.0
+data\research\runtime\venv-py314\Scripts\python.exe -m playwright install chromium
 ```
 
-`.venv/` 和 `data/**` 已被 `.gitignore` 忽略。安装后先确认 `.env`、原始数据、日志和缓存没有进入 Git。
+根目录 `.venv/` 和 `data/**` 已被 `.gitignore` 忽略。安装后先确认 `.env`、原始数据、日志和缓存没有进入 Git。
 
 ## 6. Football-Data 获取步骤
 
@@ -210,9 +210,9 @@ Agent 后续可以执行以下范围受限的研究任务：
 - 历史年份修正规则能产出隔离报告，而不是静默修正。
 - 所有原始数据仍位于 `data/` 下且未进入 Git。
 
-## 12. 下一步
+## 12. 如恢复本辅助路线时的下一步
 
-下一次执行应从补齐跨时段、跨赛事样本开始：
+本路线当前暂停扩量。只有项目状态明确恢复历史辅助研究后，才从补齐跨时段、跨赛事样本开始：
 
 1. 人工提供 2025 年 8 至 12 月比赛 URL，以及 2026 年 K1/欧战/世界杯比赛 URL。
 2. 每个新时段先执行 `1x2`、`over_under_2_5`、`asian_handicap_0` 单场无历史验证。

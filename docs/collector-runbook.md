@@ -1,28 +1,45 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V1.0  
-> 更新日期：2026-07-15
+> 版本：V1.1
+> 更新日期：2026-07-16
 
 ## 1. 安装
 
 ```powershell
 cd D:\2026-football-cups\football-cups
-py -3.14 -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e .[dev]
-football-cups-collector init --workspace .
+.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\football-cups-collector.exe init --workspace .
 ```
 
 真实配置放入未跟踪的 `.env` 或系统环境变量。`FOOTBALL_CUPS_DATA_DIR` 为空时默认使用 `<workspace>\data\500`。
 
+当前采集器读取以下配置：
+
+| 配置项 | 默认值或作用 |
+| --- | --- |
+| `APP_TIMEZONE` | `Asia/Shanghai` |
+| `LOG_LEVEL` | `INFO` |
+| `FOOTBALL_CUPS_DATA_DIR` | `<workspace>\data\500` |
+| `FOOTBALL_CUPS_BACKUP_DIR` | 无默认值，备份前必须设置 |
+| `COLLECTOR_DISCOVERY_INTERVAL_MINUTES` | `30` |
+| `COLLECTOR_REQUEST_MIN_INTERVAL_SECONDS` | `1.5` |
+| `COLLECTOR_RUN_TIME_BUDGET_SECONDS` | `100` |
+| `COLLECTOR_CLOCK_DRIFT_LIMIT_SECONDS` | `30` |
+
+`.env.example` 中数据库、授权 API 和邮件告警变量是后续阶段占位符，当前验证采集器不读取。
+
 ## 2. 单次验证
 
 ```powershell
-football-cups-collector discover --workspace .
-football-cups-collector report-daily --workspace .
+.\.venv\Scripts\football-cups-collector.exe discover --workspace .
+.\.venv\Scripts\football-cups-collector.exe report-daily --workspace .
 ```
 
-检查最新 discovery manifest、日报和 `data/500/logs/collector.log`。确认六页面清单、fixture 并集、原始 blob 和标准化 JSONL 均已生成。
+检查最新 discovery manifest、日报和 SQLite 事件。确认六页面清单、fixture 并集、原始 blob 和标准化 JSONL 均已生成。`data/500/logs/collector.log` 当前主要记录未捕获异常，正常运行时可以为空，不能单独用它判断任务是否运行。
+
+24 小时发现验证可以在完整 `run-once` 负载下执行，但只按发现轮次、六页面清单和身份数据验收。`report-daily` 按北京时间自然日统计，不能替代跨自然日的精确 24 小时窗口报告。
 
 ## 3. 安装任务计划
 
@@ -52,14 +69,16 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 ## 4. 日常操作
 
 ```powershell
-football-cups-collector run-once --workspace .
-football-cups-collector report-daily --workspace .
-football-cups-collector backup --workspace .
+.\.venv\Scripts\football-cups-collector.exe run-once --workspace .
+.\.venv\Scripts\football-cups-collector.exe report-daily --workspace .
+.\.venv\Scripts\football-cups-collector.exe backup --workspace .
 ```
 
 - 每日确认最后心跳、发现轮次、失败、来源缺盘、切点和磁盘。
-- 7 天验证期每天人工核对页面数量和 3 场数据。
+- 7 天验证期每天人工核对页面数量，并抽查至少 3 场的身份、开球/销售截止时间、竞彩 SP 和三核心市场；结果写入 `docs/data-source-evaluation.md`。
 - 每周查看连续失败；每月抽查 20 场并执行备份恢复。
+
+`run-once` 会在跨日后自动生成上一自然日的日报，但当前 Windows 任务不会自动执行 `backup`。30 天验收前必须另建每日备份任务或执行等价的固定调度，并完成一次恢复验证。
 
 ## 5. 备份
 
@@ -67,7 +86,7 @@ football-cups-collector backup --workspace .
 
 ```powershell
 $env:FOOTBALL_CUPS_BACKUP_DIR = 'E:\football-cups-backup'
-football-cups-collector backup --workspace .
+.\.venv\Scripts\football-cups-collector.exe backup --workspace .
 ```
 
 备份命令使用 SQLite backup API，并增量复制原始 blobs、manifests、normalized、results 和 reports。与数据目录位于同一卷时命令拒绝执行。
@@ -75,8 +94,8 @@ football-cups-collector backup --workspace .
 恢复测试应恢复到临时目录，运行：
 
 ```powershell
-football-cups-collector rebuild-state --workspace <restored-workspace>
-football-cups-collector report-daily --workspace <restored-workspace>
+.\.venv\Scripts\football-cups-collector.exe rebuild-state --workspace <restored-workspace>
+.\.venv\Scripts\football-cups-collector.exe report-daily --workspace <restored-workspace>
 ```
 
 ## 6. 故障恢复
@@ -93,7 +112,7 @@ football-cups-collector report-daily --workspace <restored-workspace>
 对杯赛或未知赛事准备 CSV：
 
 ```powershell
-football-cups-collector verify-results --workspace . --input verified-results.csv
+.\.venv\Scripts\football-cups-collector.exe verify-results --workspace . --input verified-results.csv
 ```
 
 比分必须是常规时间 90 分钟及补时。冲突记录不会覆盖已有结果。
