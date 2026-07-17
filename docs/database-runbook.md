@@ -1,6 +1,6 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.4
+> 版本：V1.5
 > 更新日期：2026-07-17
 
 ## 1. 本地运行方式
@@ -45,6 +45,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 `init` 只执行尚未应用的迁移，并拒绝已经应用后又被修改的 SQL 文件。`import-files` 先核对不可变 manifest，再按 JSONL 检查点增量导入。`import-jsonl` 只用于诊断，不替代日常 `import-files`。
 
 `status` 额外返回 `current_verified_results` 和 `strict_fixture_results_by_cutoff`。后者按不同预测切点统计不同 fixture，不能把同场多个切点相加作为阶段 4 的 500 场门禁。
+
+研究层使用独立入口：
+
+```powershell
+.\.venv\Scripts\football-cups-research.exe db-import --workspace .
+```
+
+命令会应用未执行迁移、使用独立 advisory lock 和文件哈希检查点，并在导入前后比较 `football.strict_fixture_results_by_cutoff`。计数变化时立即失败。研究层可删除后从 `data/research/normalized/` 重放，但不得并入正式导入任务。
 
 退出码：
 

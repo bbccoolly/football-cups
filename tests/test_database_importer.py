@@ -228,10 +228,11 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
     with connect(config, autocommit=True) as raw:
         if not raw.info.dbname.endswith("_test"):
             pytest.fail("integration test database name must end with _test")
+        raw.execute("DROP SCHEMA IF EXISTS research CASCADE")
         raw.execute("DROP SCHEMA IF EXISTS football CASCADE")
 
     with connect(config) as connection:
-        assert apply_migrations(connection) == ["001", "002", "003"]
+        assert apply_migrations(connection) == ["001", "002", "003", "004", "005"]
         with connect(config) as competing:
             with import_lock(connection):
                 with pytest.raises(ImportAlreadyRunning):

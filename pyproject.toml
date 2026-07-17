@@ -23,6 +23,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 football-cups-collector = "football_cups.collector.cli:main"
 football-cups-db = "football_cups.database.cli:main"
+football-cups-research = "football_cups.research.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

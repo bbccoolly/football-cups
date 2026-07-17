@@ -8,7 +8,7 @@
 
 项目处于“阶段 3：标准化数据库”。项目负责人已授权在采集验证继续运行的同时提前建设 PostgreSQL 可重建分析层；这不代表 24 小时、7 天或 30 天采集验收已经通过。当前仍不开发模型或 Web 产品，也不将验证采集器标记为长期生产可用。
 
-当前进度及唯一下一步见 `docs/project-status.md`。阿里云杭州 ECS 已创建，但目前只允许隔离 smoke；数据盘、OSS 和正式切换门禁尚未完成。
+当前进度及唯一下一步见 `docs/project-status.md`。隔离的公开历史研究基线已经可运行，但不属于正式阶段 4。阿里云杭州 ECS 已创建，但目前只允许隔离 smoke；数据盘、OSS 和正式切换门禁尚未完成。
 
 ## 文档入口
 
@@ -57,6 +57,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 ```
 
 数据库是可重建分析层，不能替代原始 blob、manifest 和 JSONL。完整操作见 `docs/database-runbook.md`。
+
+## 历史研究
+
+公开静态历史数据使用完全隔离的命令和 schema：
+
+```powershell
+.\.venv\Scripts\football-cups-research.exe catalog --workspace .
+.\.venv\Scripts\football-cups-research.exe normalize --workspace . --since 2025-01-01
+.\.venv\Scripts\football-cups-research.exe db-import --workspace .
+.\.venv\Scripts\football-cups-research.exe report-coverage --workspace .
+.\.venv\Scripts\football-cups-research.exe evaluate-baseline --workspace .
+```
+
+该路线不抓取 500 历史页面，不进入正式 `football` schema，也不能替代严格前瞻验收。来源、K1 导入和访问频率规则见 `docs/research-data-acquisition-plan.md`。
 
 ## 安全提示
 

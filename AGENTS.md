@@ -24,6 +24,7 @@
 - 继续运行并维护比赛发现、原始响应、标准化 JSONL、质量检查和验证采集器。
 - 使用 SQLite 保存可重建的采集调度状态。
 - 建立 PostgreSQL schema、迁移、JSONL/manifest 可重放导入、质量审计和 as-of 查询。
+- 在独立 `data/research/` 和 PostgreSQL `research` schema 中导入公开静态历史数据，运行 D-022 允许的离线研究基线。
 - 并行完成 24 小时、7 天和 30 天采集验证。
 - 准备阿里云迁移文档、Linux/systemd 适配、健康检查、精确窗口报告和可恢复备份接口。
 - 在隔离目录执行云端 smoke；正式 Linux timer 必须要求 `/srv/football-cups` 是真实数据盘挂载点。
@@ -32,6 +33,7 @@
 
 - 将验证采集器描述为长期生产可用。
 - 在阶段 4 所需的至少 500 场严格快照及已验证赛果门禁完成前开发模型。
+- 将 D-022 的历史研究基线用于当前比赛预测、正式模型、Web/API 或阶段 4 门禁计数。
 - 在阶段 4 市场基线和阶段 5 增强模型门禁完成前开发 Web 产品。
 
 PostgreSQL 是可重建分析层，不得成为原始事实来源。当前数据源用于个人学习研究；付费或授权 API 调研是未来可选项。
@@ -46,9 +48,11 @@ PostgreSQL 是可重建分析层，不得成为原始事实来源。当前数据
 - 每条市场记录保留 `source_event_time`、`observed_at`、`ingested_at`、`corrected_at`。
 - `observed_at` 是 HTTP 响应完整接收时间；预测和回测只能使用 `observed_at <= prediction_cutoff` 的数据。
 - 历史回抓统一标记 `backfill=true`、`strict_backtest_eligible=false`。
+- 历史研究记录还必须标记 `research_only=true`、`cutoff_eligible=false`，不得映射为正式预测切点。
 - 已验证赛果和已发布预测不可覆盖；冲突或修正必须形成带原因的新版本。
 - 赛果闭环采用全自动确认与保守隔离：无法自动证明 90 分钟口径时保留候选但不得进入训练，不创建人工赛果待办。
 - Windows 正式运行采用 D 盘事实层、G 盘双层异盘备份；每日镜像和每周内容寻址备份必须通过一致性快照，不能与活动 JSONL 写入并发。
+- 历史研究只下载显式注册的公开静态文件；禁止批量访问 500 历史页面，禁止代理/IP/Cookie 轮换、指纹伪装、验证码绕过或其他身份规避。
 
 修改以上规则属于产品级决策，必须同步更新产品方案和决策日志。
 
@@ -89,6 +93,7 @@ Agent 负责：
 - `docs/database-design.md`：PostgreSQL schema、导入和 as-of 查询契约。
 - `docs/database-runbook.md`：本地 PostgreSQL 安装、迁移、重放和恢复操作。
 - `docs/cloud-migration-plan.md`：阿里云 ECS 迁移准备、备份、切换和回滚规则。
+- `docs/research-data-acquisition-plan.md`：公开历史研究来源、访问控制、导入和离线评估操作。
 
 ## 7. 每次任务的完成条件
 
