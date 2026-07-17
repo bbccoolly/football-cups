@@ -3,6 +3,8 @@ param(
     [string]$Workspace = "",
     [string]$TaskName = "FootballCups-Database-Import",
     [string]$UserId = "",
+    [Security.SecureString]$Password,
+    [switch]$PasswordLogon,
     [switch]$Interactive,
     [switch]$Uninstall
 )
@@ -51,18 +53,42 @@ $settings = New-ScheduledTaskSettingsSet `
 if (-not $UserId) {
     $UserId = "$env:USERDOMAIN\$env:USERNAME"
 }
-$logonType = if ($Interactive) { "Interactive" } else { "S4U" }
+if ($Interactive -and $PasswordLogon) {
+    throw "Interactive and PasswordLogon cannot be used together."
+}
+if ($PasswordLogon -and -not $Password) {
+    throw "PasswordLogon requires an in-memory SecureString password."
+}
+$logonType = if ($Interactive) { "Interactive" } elseif ($PasswordLogon) { "Password" } else { "S4U" }
 $principal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType $logonType -RunLevel Limited
 $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal
 
 if ($PSCmdlet.ShouldProcess($TaskName, "Register database import scheduled task")) {
+    $passwordText = $null
     try {
-        Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null
+        if ($PasswordLogon) {
+            $credential = [Management.Automation.PSCredential]::new($UserId, $Password)
+            $passwordText = $credential.GetNetworkCredential().Password
+            Register-ScheduledTask `
+                -TaskName $TaskName `
+                -InputObject $task `
+                -User $UserId `
+                -Password $passwordText `
+                -Force | Out-Null
+        }
+        else {
+            Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null
+        }
     }
     catch [Microsoft.Management.Infrastructure.CimException] {
-        if (-not $Interactive -and $_.Exception.Message -match "Access is denied") {
+        if (-not $Interactive -and -not $PasswordLogon -and
+            $_.Exception.Message -match "Access is denied|\u62d2\u7edd\u8bbf\u95ee") {
             throw "S4U task registration requires an elevated PowerShell. Rerun with -Interactive for logged-in validation."
         }
         throw
+    }
+    finally {
+        $passwordText = $null
+        $credential = $null
     }
 }

@@ -1,6 +1,6 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.3
+> 版本：V1.4
 > 更新日期：2026-07-17
 
 ## 1. 本地运行方式
@@ -54,17 +54,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 
 ## 4. 定时导入
 
-PostgreSQL 拒绝使用管理员组成员的安全令牌启动服务器。提升的 PowerShell 必须先创建专用非管理员 S4U 账户并授予最小目录权限，再安装每 5 分钟执行的任务：
+PostgreSQL 拒绝使用管理员组成员的安全令牌启动服务器。提升的 PowerShell 使用一条命令创建或更新专用非管理员账户、授予最小目录权限、轮换本机随机密码，并注册每 5 分钟执行的数据库任务：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_database_task_user.ps1 -Workspace . -WhatIf
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_database_task_user.ps1 -Workspace .
-$userId = "$env:COMPUTERNAME\football-cups-runner"
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -UserId $userId -WhatIf
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -UserId $userId
 ```
 
-当前任务名为 `FootballCups-Database-Import`。专用账户没有管理员权限，只获得代码读取/执行和 `data/` 修改权限；任务会先启动本地 PostgreSQL，再运行 `import-files`。不得改用管理员组账户伪装完成重启验收。卸载：
+当前任务名为 `FootballCups-Database-Import`。专用账户属于内置 `Users` 但不属于 `Administrators`，只获得代码和 Python 基础运行时读取/执行、`data/` 修改及 `.env` 读取权限。任务使用 Task Scheduler `Password` 登录类型，随机凭据只由 Windows LSA 加密保存，不进入任务 XML、文件或日志。任务会先启动本地 PostgreSQL，再运行 `import-files`。不得改用管理员组账户伪装完成重启验收。
+
+当前独立主机实测拒绝管理员为另一个本地标准账户注册 S4U，即使已授予批处理登录权；因此 D-021 接受上述本机密码登录兼容路径。若迁移到域账户或新的 Windows 主机，应重新评估能否恢复 S4U，而不是复制现有本机凭据。卸载：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -Uninstall
