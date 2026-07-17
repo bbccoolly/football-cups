@@ -57,14 +57,16 @@ py -3.11 -m venv .venv
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.ps1 -WhatIf
-powershell -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -WhatIf
+powershell -ExecutionPolicy Bypass -File scripts\windows\configure_database_task_user.ps1 -Workspace . -WhatIf
+powershell -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -UserId "$env:COMPUTERNAME\football-cups-runner" -WhatIf
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_backup_tasks.ps1 -Workspace . -WhatIf
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.ps1
-powershell -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace .
+powershell -ExecutionPolicy Bypass -File scripts\windows\configure_database_task_user.ps1 -Workspace .
+powershell -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -UserId "$env:COMPUTERNAME\football-cups-runner"
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_backup_tasks.ps1 -Workspace .
 ```
 
-采集任务每 2 分钟运行，数据库每 5 分钟导入，每日 03:30 执行增量镜像，每周日 04:30 生成内容寻址批次。四个任务使用 S4U、禁止并行、允许唤醒并在失败后重试。S4U 通常不能访问需要交互凭据的网络共享，当前使用本机 G 盘。
+采集任务每 2 分钟运行，数据库每 5 分钟导入，每日 03:30 执行增量镜像，每周日 04:30 生成内容寻址批次。四个任务使用 S4U、禁止并行、允许唤醒并在失败后重试。数据库任务必须使用专用非管理员 `football-cups-runner`，否则 PostgreSQL 会拒绝在重启后启动；其他任务使用当前用户。S4U 通常不能访问需要交互凭据的网络共享，当前使用本机 G 盘。
 
 S4U 注册需要提升的 PowerShell。非管理员会话可以仅为 24 小时验证安装显式回退任务：
 

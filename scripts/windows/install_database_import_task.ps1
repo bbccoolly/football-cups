@@ -2,6 +2,7 @@
 param(
     [string]$Workspace = "",
     [string]$TaskName = "FootballCups-Database-Import",
+    [string]$UserId = "",
     [switch]$Interactive,
     [switch]$Uninstall
 )
@@ -47,9 +48,11 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 5)
 
-$userId = "$env:USERDOMAIN\$env:USERNAME"
+if (-not $UserId) {
+    $UserId = "$env:USERDOMAIN\$env:USERNAME"
+}
 $logonType = if ($Interactive) { "Interactive" } else { "S4U" }
-$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType $logonType -RunLevel Limited
+$principal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType $logonType -RunLevel Limited
 $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal
 
 if ($PSCmdlet.ShouldProcess($TaskName, "Register database import scheduled task")) {

@@ -54,14 +54,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 
 ## 4. 定时导入
 
-预演并安装每 5 分钟执行的任务：
+PostgreSQL 拒绝使用管理员组成员的安全令牌启动服务器。提升的 PowerShell 必须先创建专用非管理员 S4U 账户并授予最小目录权限，再安装每 5 分钟执行的任务：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -Interactive -WhatIf
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -Interactive
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_database_task_user.ps1 -Workspace . -WhatIf
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_database_task_user.ps1 -Workspace .
+$userId = "$env:COMPUTERNAME\football-cups-runner"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -UserId $userId -WhatIf
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -UserId $userId
 ```
 
-当前任务名为 `FootballCups-Database-Import`。`-Interactive` 要求用户保持登录；长期无人值守前应在提升的 PowerShell 中移除 `-Interactive` 重装 S4U 模式。任务会先启动本地 PostgreSQL，再运行 `import-files`。卸载：
+当前任务名为 `FootballCups-Database-Import`。专用账户没有管理员权限，只获得代码读取/执行和 `data/` 修改权限；任务会先启动本地 PostgreSQL，再运行 `import-files`。不得改用管理员组账户伪装完成重启验收。卸载：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -Uninstall

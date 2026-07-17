@@ -23,6 +23,17 @@ def test_backup_task_installer_has_stable_s4u_schedules() -> None:
     assert "$Uninstall" in text
 
 
+def test_database_task_supports_a_dedicated_non_admin_s4u_user() -> None:
+    installer = (WINDOWS / "install_database_import_task.ps1").read_text(encoding="utf-8")
+    configurator = (WINDOWS / "configure_database_task_user.ps1").read_text(encoding="utf-8")
+    assert '[string]$UserId = ""' in installer
+    assert "-UserId $UserId -LogonType $logonType -RunLevel Limited" in installer
+    assert 'New-LocalUser `' in configurator
+    assert "-NoPassword" in configurator
+    assert 'Get-LocalGroup -SID "S-1-5-32-544"' in configurator
+    assert '"${identity}:(OI)(CI)M"' in configurator
+
+
 def test_backup_configuration_preserves_other_environment_lines() -> None:
     text = (WINDOWS / "configure_local_backup.ps1").read_text(encoding="utf-8")
     assert "Get-Content -LiteralPath $envPath" in text
@@ -46,6 +57,8 @@ def test_windows_backup_scripts_parse() -> None:
         "configure_local_backup.ps1",
         "run_backup_task.ps1",
         "install_backup_tasks.ps1",
+        "configure_database_task_user.ps1",
+        "install_database_import_task.ps1",
     ):
         path = WINDOWS / name
         command = (
