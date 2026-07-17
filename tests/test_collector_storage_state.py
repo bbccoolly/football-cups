@@ -3,10 +3,21 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from football_cups.collector.config import CollectorConfig
-from football_cups.collector.backup import run_oss_backup, verify_oss_backup
+import json
+
+import pytest
+
+from football_cups.collector import backup as backup_module
+from football_cups.collector.backup import (
+    BackupConsistencyError,
+    BackupLockTimeout,
+    run_backup,
+    run_oss_backup,
+    verify_oss_backup,
+)
 from football_cups.collector.http import ObservedResponse
 from football_cups.collector.state import StateStore
-from football_cups.collector.storage import DataStore
+from football_cups.collector.storage import DataStore, SingleInstanceLock
 from football_cups.collector.timeutil import iso_utc
 from football_cups.collector.service import rebuild_state
 
@@ -182,3 +193,112 @@ def test_oss_backup_requires_complete_marker_and_restores_hashes(tmp_path) -> No
     assert verified["file_count"] == result["file_count"]
     assert (restored / "manifests" / "2026" / "07" / "15" / "run-one-test.json").is_file()
     assert (restored / "state" / "collector.sqlite3").is_file()
+
+
+def test_incremental_backup_uses_completed_manifest_and_sqlite_snapshot(tmp_path) -> None:
+    config = CollectorConfig(
+        workspace=tmp_path,
+        data_dir=tmp_path / "data" / "500",
+        backup_dir=tmp_path / "backup",
+        oss_backup_dir=None,
+    )
+    now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    DataStore(config).write_manifest("test", "run-one", {"value": 1}, now)
+    with StateStore(config):
+        pass
+
+    result = run_backup(config, require_distinct_volume=False, now=now)
+    manifest_path = config.backup_dir / "manifests" / f"{result['run_id']}.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["status"] == "completed"
+    assert manifest["backup_kind"] == "incremental"
+    assert manifest["state_quick_check"] == "ok"
+    assert manifest["integrity_level"] == "operational_mirror"
+    assert (config.backup_dir / "data-500" / "state" / "collector.sqlite3").is_file()
+    assert not list((config.data_dir / "state" / "backup-staging").glob("*"))
+
+
+def test_backup_times_out_when_collector_lock_is_held(tmp_path) -> None:
+    config = CollectorConfig(
+        workspace=tmp_path,
+        data_dir=tmp_path / "data" / "500",
+        backup_dir=tmp_path / "backup",
+        oss_backup_dir=None,
+        backup_lock_wait_seconds=0,
+        backup_lock_poll_seconds=0.01,
+    )
+    with StateStore(config):
+        pass
+    with SingleInstanceLock(config.lock_path) as lock:
+        assert lock.acquired
+        with pytest.raises(BackupLockTimeout):
+            run_backup(config, require_distinct_volume=False)
+
+
+def test_oss_backup_snapshots_active_jsonl_before_releasing_lock(tmp_path, monkeypatch) -> None:
+    config = CollectorConfig(
+        workspace=tmp_path,
+        data_dir=tmp_path / "data" / "500",
+        backup_dir=None,
+        oss_backup_dir=tmp_path / "oss",
+    )
+    now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+    store = DataStore(config)
+    live_path = store.append_normalized("quality_events", {"record_id": "first"}, now)
+    with StateStore(config):
+        pass
+    original_store = backup_module._store_object
+    appended = False
+
+    def append_during_store(item, objects_root, digest):
+        nonlocal appended
+        if not appended and item.relative_path.endswith("quality_events.jsonl"):
+            with live_path.open("a", encoding="utf-8") as handle:
+                handle.write('{"record_id":"late"}\n')
+            appended = True
+        return original_store(item, objects_root, digest)
+
+    monkeypatch.setattr(backup_module, "_store_object", append_during_store)
+    result = run_oss_backup(config, now=now)
+    restored = tmp_path / "restored"
+    verify_oss_backup(config, run_id=result["run_id"], target=restored)
+
+    restored_lines = (restored / live_path.relative_to(config.data_dir)).read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(restored_lines) == 1
+    assert len(live_path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_oss_backup_rejects_changed_immutable_source_without_complete_marker(
+    tmp_path, monkeypatch
+) -> None:
+    config = CollectorConfig(
+        workspace=tmp_path,
+        data_dir=tmp_path / "data" / "500",
+        backup_dir=None,
+        oss_backup_dir=tmp_path / "oss",
+    )
+    now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    source = config.data_dir / "manifests" / "2026" / "07" / "15" / "source.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("one", encoding="utf-8")
+    with StateStore(config):
+        pass
+    original_store = backup_module._store_object
+    changed = False
+
+    def change_source(item, objects_root, digest):
+        nonlocal changed
+        if not changed and not item.staged:
+            item.source.write_text("changed", encoding="utf-8")
+            changed = True
+        return original_store(item, objects_root, digest)
+
+    monkeypatch.setattr(backup_module, "_store_object", change_source)
+    with pytest.raises(BackupConsistencyError):
+        run_oss_backup(config, now=now)
+
+    runs_root = config.oss_backup_dir / "runs"
+    assert not runs_root.exists() or not list(runs_root.rglob("complete.json"))

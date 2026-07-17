@@ -1,6 +1,6 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.2
+> 版本：V1.3
 > 更新日期：2026-07-17
 
 ## 1. 本地运行方式
@@ -97,6 +97,8 @@ postgresql://<user>:<password>@<host>:<port>/<database>
 - schema migration hash 变化：新增后续迁移，不修改已经应用的迁移。
 - 数据库损坏：保留故障目录，新建空集群/数据库，执行 `init` 和 `import-files`。
 - 数据库备份只是加速恢复；原始 blob、manifest 和 JSONL 的异盘备份仍是最高优先级。
+
+异盘恢复验收必须把内容寻址批次恢复到全新目录，设置临时 `FOOTBALL_CUPS_DATA_DIR`，执行 `rebuild-state`，再导入名称以 `_test` 结尾的空数据库。首次导入、重复导入、`unsupported_records=0` 和严格赛果计数一致后才算数据库恢复通过；不得对主库执行恢复测试。
 
 真实集成测试使用名称以 `_test` 结尾的隔离数据库：
 

@@ -25,6 +25,30 @@ def day_bounds(day: date, timezone_name: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _runner_skip_count(config: CollectorConfig, start: datetime, end: datetime) -> int:
+    count = 0
+    current = start.date()
+    while current <= end.date():
+        root = (
+            config.data_dir
+            / "manifests"
+            / current.strftime("%Y")
+            / current.strftime("%m")
+            / current.strftime("%d")
+        )
+        if root.is_dir():
+            for path in root.glob("*-runner-skip.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    occurred_at = parse_iso(str(payload["occurred_at"]))
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+                if start <= occurred_at < end and payload.get("status") == "skipped_locked":
+                    count += 1
+        current += timedelta(days=1)
+    return count
+
+
 def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[str, Any]:
     deadline_start = start - timedelta(hours=24)
     deadline_end = end - timedelta(hours=24)
@@ -131,6 +155,9 @@ def build_daily_report(
     events = state.events_for_day(start, end)
     runs = state.runs_for_day(start, end)
     event_counts = Counter((event["event_type"], event["status"]) for event in events)
+    locked_skips = _runner_skip_count(config, start, end)
+    if locked_skips:
+        event_counts[("runner", "skipped_locked")] += locked_skips
     market_by_competition: dict[str, Counter[str]] = defaultdict(Counter)
     cutoff_counts: dict[str, Counter[str]] = defaultdict(Counter)
     for event in events:
@@ -156,8 +183,10 @@ def build_daily_report(
         "generated_at": iso_utc(generated),
         "last_heartbeat": state.get_meta("last_heartbeat_at"),
         "runs": {
-            "total": len(runs),
-            "by_status": dict(Counter(run["status"] for run in runs)),
+            "total": len(runs) + locked_skips,
+            "by_status": dict(
+                Counter(run["status"] for run in runs) + Counter({"skipped_locked": locked_skips})
+            ),
         },
         "metrics": {
             "discovery_full_success_rate": _ratio(
@@ -192,6 +221,9 @@ def build_window_report(
     events = state.events_for_range(start, end)
     runs = state.runs_for_range(start, end)
     event_counts = Counter((event["event_type"], event["status"]) for event in events)
+    locked_skips = _runner_skip_count(config, start, end)
+    if locked_skips:
+        event_counts[("runner", "skipped_locked")] += locked_skips
     cutoff_counts: dict[str, Counter[str]] = defaultdict(Counter)
     market_by_competition: dict[str, Counter[str]] = defaultdict(Counter)
     for event in events:
@@ -219,8 +251,10 @@ def build_window_report(
         "timezone": config.timezone_name,
         "last_heartbeat": state.get_meta("last_heartbeat_at"),
         "runs": {
-            "total": len(runs),
-            "by_status": dict(Counter(run["status"] for run in runs)),
+            "total": len(runs) + locked_skips,
+            "by_status": dict(
+                Counter(run["status"] for run in runs) + Counter({"skipped_locked": locked_skips})
+            ),
         },
         "metrics": {
             "discovery_full_success_rate": _ratio(

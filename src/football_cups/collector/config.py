@@ -74,6 +74,12 @@ class CollectorConfig:
     health_heartbeat_max_age_minutes: int = 10
     health_discovery_max_age_minutes: int = 45
     health_clock_max_age_minutes: int = 45
+    backup_lock_wait_seconds: int = 300
+    backup_lock_poll_seconds: float = 5.0
+    backup_warning_max_age_hours: float = 26.0
+    backup_failed_max_age_hours: float = 48.0
+    oss_backup_warning_max_age_days: float = 8.0
+    oss_backup_failed_max_age_days: float = 15.0
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:
@@ -93,6 +99,19 @@ class CollectorConfig:
             self.health_clock_max_age_minutes,
         ) <= 0:
             raise ValueError("health age thresholds must be positive")
+        if self.backup_lock_wait_seconds < 0 or self.backup_lock_poll_seconds <= 0:
+            raise ValueError("backup lock timing values are invalid")
+        if min(
+            self.backup_warning_max_age_hours,
+            self.backup_failed_max_age_hours,
+            self.oss_backup_warning_max_age_days,
+            self.oss_backup_failed_max_age_days,
+        ) <= 0:
+            raise ValueError("backup age thresholds must be positive")
+        if self.backup_warning_max_age_hours > self.backup_failed_max_age_hours:
+            raise ValueError("backup warning age cannot exceed failed age")
+        if self.oss_backup_warning_max_age_days > self.oss_backup_failed_max_age_days:
+            raise ValueError("OSS backup warning age cannot exceed failed age")
 
     @classmethod
     def from_workspace(cls, workspace: Path) -> "CollectorConfig":
@@ -127,6 +146,20 @@ class CollectorConfig:
             ),
             health_clock_max_age_minutes=_env_int(
                 "COLLECTOR_HEALTH_CLOCK_MAX_AGE_MINUTES", 45
+            ),
+            backup_lock_wait_seconds=_env_int("COLLECTOR_BACKUP_LOCK_WAIT_SECONDS", 300),
+            backup_lock_poll_seconds=_env_float("COLLECTOR_BACKUP_LOCK_POLL_SECONDS", 5.0),
+            backup_warning_max_age_hours=_env_float(
+                "COLLECTOR_BACKUP_WARNING_MAX_AGE_HOURS", 26.0
+            ),
+            backup_failed_max_age_hours=_env_float(
+                "COLLECTOR_BACKUP_FAILED_MAX_AGE_HOURS", 48.0
+            ),
+            oss_backup_warning_max_age_days=_env_float(
+                "COLLECTOR_OSS_BACKUP_WARNING_MAX_AGE_DAYS", 8.0
+            ),
+            oss_backup_failed_max_age_days=_env_float(
+                "COLLECTOR_OSS_BACKUP_FAILED_MAX_AGE_DAYS", 15.0
             ),
             log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         )

@@ -11,6 +11,7 @@ from football_cups.collector.markets import parse_market_workbook
 from football_cups.collector.reporting import build_daily_report, build_window_report, day_bounds
 from football_cups.collector.state import StateStore
 from football_cups.collector.service import CollectorService
+from football_cups.collector.storage import DataStore
 from football_cups.collector.timeutil import iso_utc
 
 
@@ -81,6 +82,28 @@ def test_window_report_uses_exact_bounds(tmp_path) -> None:
     assert report["metrics"]["discovery_full_success_rate"] == 0.5
     assert report["event_counts"]["discovery_poll:full"] == 1
     assert report["event_counts"]["discovery_poll:partial"] == 1
+
+
+def test_window_report_counts_runner_lock_skips_from_immutable_manifests(tmp_path) -> None:
+    config = config_for(tmp_path)
+    start = datetime(2026, 7, 15, 0, tzinfo=timezone.utc)
+    end = start + timedelta(hours=24)
+    DataStore(config).write_manifest(
+        "runner-skip",
+        "locked-run",
+        {
+            "record_type": "RunnerSkip",
+            "status": "skipped_locked",
+            "occurred_at": iso_utc(start + timedelta(minutes=5)),
+        },
+        start + timedelta(minutes=5),
+    )
+    with StateStore(config) as state:
+        report = build_window_report(config, state, start, end, generated_at=end)
+
+    assert report["runs"]["total"] == 1
+    assert report["runs"]["by_status"] == {"skipped_locked": 1}
+    assert report["event_counts"]["runner:skipped_locked"] == 1
 
 
 def test_result_metrics_count_unique_fixtures_and_24h_deadlines(tmp_path) -> None:

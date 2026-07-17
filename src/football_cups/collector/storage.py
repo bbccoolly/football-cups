@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import time
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -105,8 +106,7 @@ class SingleInstanceLock:
             return True
         return age <= self.stale_after
 
-    def acquire(self) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def _try_acquire(self) -> bool:
         now = utc_now()
         payload = self._current_payload(now)
         try:
@@ -118,11 +118,26 @@ class SingleInstanceLock:
                 self.path.unlink()
             except OSError:
                 return False
-            return self.acquire()
+            return self._try_acquire()
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json_dumps(payload))
         self.acquired = True
         return True
+
+    def acquire(self, *, wait_seconds: float = 0, poll_seconds: float = 5) -> bool:
+        if wait_seconds < 0:
+            raise ValueError("wait_seconds must be non-negative")
+        if poll_seconds <= 0:
+            raise ValueError("poll_seconds must be positive")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            if self._try_acquire():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(poll_seconds, remaining))
 
     def release(self) -> None:
         if self.acquired:

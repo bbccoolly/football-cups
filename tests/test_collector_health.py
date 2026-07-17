@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from football_cups.collector.cli import _health
+from football_cups.collector.backup import run_backup, run_oss_backup
 from football_cups.collector.config import CollectorConfig
 from football_cups.collector.state import StateStore
 from football_cups.collector.timeutil import iso_utc
@@ -124,3 +125,57 @@ def test_database_config_refuses_an_unavailable_required_mount(tmp_path, monkeyp
 
     with pytest.raises(OSError, match="required data mount is unavailable"):
         DatabaseConfig.from_workspace(tmp_path)
+
+
+def test_health_tracks_completed_backup_ages(tmp_path) -> None:
+    now = datetime(2026, 7, 16, 9, tzinfo=timezone.utc)
+    config = config_for(
+        tmp_path,
+        backup_dir=tmp_path / "backup",
+        oss_backup_dir=tmp_path / "oss",
+    )
+    config.backup_dir.mkdir()
+    config.oss_backup_dir.mkdir()
+    set_healthy_timestamps(config, now)
+
+    missing = _health(config, now=now)
+    assert missing["status"] == "warning"
+    assert missing["backup_status"] == "warning"
+    assert missing["oss_backup_status"] == "warning"
+
+    run_backup(config, require_distinct_volume=False, now=now)
+    run_oss_backup(config, now=now)
+    set_healthy_timestamps(config, now + timedelta(hours=1))
+    healthy = _health(config, now=now + timedelta(hours=1))
+    assert healthy["status"] == "ok"
+    assert healthy["backup_status"] == "ok"
+    assert healthy["oss_backup_status"] == "ok"
+    assert healthy["backup_drive_free_bytes"] > 0
+
+    set_healthy_timestamps(config, now + timedelta(hours=27))
+    warning = _health(config, now=now + timedelta(hours=27))
+    assert warning["status"] == "warning"
+    assert warning["backup_status"] == "warning"
+
+    set_healthy_timestamps(config, now + timedelta(days=16))
+    failed = _health(config, now=now + timedelta(days=16))
+    assert failed["status"] == "failed"
+    assert failed["backup_status"] == "failed"
+    assert failed["oss_backup_status"] == "failed"
+
+
+def test_health_fails_when_configured_backup_drive_is_unavailable(tmp_path) -> None:
+    now = datetime(2026, 7, 16, 9, tzinfo=timezone.utc)
+    config = config_for(
+        tmp_path,
+        backup_dir=tmp_path / "missing-backup-drive",
+        oss_backup_dir=tmp_path / "missing-oss-drive",
+    )
+    set_healthy_timestamps(config, now)
+
+    result = _health(config, now=now)
+
+    assert result["status"] == "failed"
+    assert result["backup_status"] == "failed"
+    assert result["oss_backup_status"] == "failed"
+    assert "backup_directory_unavailable" in {item["code"] for item in result["issues"]}

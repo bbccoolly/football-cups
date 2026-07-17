@@ -11,12 +11,19 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .backup import run_backup, run_oss_backup, verify_oss_backup
+from .backup import (
+    BackupConsistencyError,
+    BackupLockTimeout,
+    backup_health,
+    run_backup,
+    run_oss_backup,
+    verify_oss_backup,
+)
 from .config import CollectorConfig
 from .reporting import write_daily_report, write_window_report
 from .service import CollectorService, rebuild_state
 from .state import StateStore
-from .storage import DataStore, SingleInstanceLock, json_dumps
+from .storage import DataStore, SingleInstanceLock, json_dumps, make_run_id
 from .timeutil import parse_iso, utc_now
 
 
@@ -85,6 +92,24 @@ def _locked(config: CollectorConfig) -> SingleInstanceLock:
     return SingleInstanceLock(config.lock_path)
 
 
+def _record_locked_skip(config: CollectorConfig, command: str) -> None:
+    occurred_at = utc_now()
+    run_id = make_run_id(occurred_at)
+    DataStore(config).write_manifest(
+        "runner-skip",
+        run_id,
+        {
+            "schema_version": 1,
+            "record_type": "RunnerSkip",
+            "run_id": run_id,
+            "command": command,
+            "status": "skipped_locked",
+            "occurred_at": occurred_at.isoformat().replace("+00:00", "Z"),
+        },
+        occurred_at,
+    )
+
+
 def _health(config: CollectorConfig, *, now: datetime | None = None) -> dict[str, object]:
     checked_at = now or utc_now()
     mount_required = config.required_mount is not None
@@ -111,6 +136,8 @@ def _health(config: CollectorConfig, *, now: datetime | None = None) -> dict[str
 
     config.ensure_directories()
     issues: list[dict[str, str]] = []
+    backup_state, backup_issues = backup_health(config, now=checked_at)
+    issues.extend(backup_issues)
     with StateStore(config) as state:
         quick_check = state.connection.execute("PRAGMA quick_check").fetchone()[0]
         pending_jobs = state.connection.execute(
@@ -282,6 +309,7 @@ def _health(config: CollectorConfig, *, now: datetime | None = None) -> dict[str
             "disk_critical_bytes": critical_bytes,
             "backup_dir_configured": config.backup_dir is not None,
             "oss_backup_dir_configured": config.oss_backup_dir is not None,
+            **backup_state,
             "issues": issues,
         }
 
@@ -332,18 +360,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "backup":
         try:
             result = run_backup(config)
-        except (OSError, ValueError) as exc:
+        except BackupLockTimeout as exc:
+            print(json_dumps({"status": "skipped_locked", "error": str(exc)}, indent=2))
+            return 1
+        except ValueError as exc:
             print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
             return 2
+        except (BackupConsistencyError, OSError, sqlite3.Error) as exc:
+            print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
+            return 3
         print(json_dumps(result, indent=2))
         return 0
 
     if args.command == "backup-oss":
         try:
             result = run_oss_backup(config)
-        except (OSError, ValueError, sqlite3.Error) as exc:
+        except BackupLockTimeout as exc:
+            print(json_dumps({"status": "skipped_locked", "error": str(exc)}, indent=2))
+            return 1
+        except ValueError as exc:
             print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
             return 2
+        except (BackupConsistencyError, OSError, sqlite3.Error) as exc:
+            print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
+            return 3
         print(json_dumps(result, indent=2))
         return 0
 
@@ -358,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
 
     with _locked(config) as lock:
         if not lock.acquired:
+            if args.command == "run-once":
+                _record_locked_skip(config, args.command)
             print(json_dumps({"status": "skipped_locked"}, indent=2))
             return 0
         with CollectorService(config) as service:
