@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import time
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -17,12 +18,19 @@ from .http import CollectorHttpError, ObservedResponse, RateLimitedHttpClient
 from .markets import MarketCollector
 from .reporting import write_daily_report
 from .results import (
+    AnalysisScore,
+    ResultParseError,
+    existing_result_records,
     import_verified_results,
+    is_blocked_result_page,
     load_competition_formats,
     make_candidate,
     make_verified_result,
     parse_analysis_page,
-    parse_completed_page,
+    parse_live_result,
+    parse_live_result_feed,
+    result_feed_url,
+    result_page_url,
 )
 from .state import StateStore
 from .storage import DataStore, json_dumps, make_run_id, stable_record_id
@@ -30,9 +38,6 @@ from .timeutil import iso_utc, parse_http_date, parse_iso, utc_now
 
 
 LOGGER = logging.getLogger(__name__)
-COMPLETED_URL = "https://live.500.com/wanchang.php"
-
-
 class CriticalCollectorError(RuntimeError):
     pass
 
@@ -45,6 +50,18 @@ class CollectorService:
         self.state = StateStore(config)
         self.http = RateLimitedHttpClient(config)
         self.markets = MarketCollector(config, self.http, self.data)
+        self.competition_formats = load_competition_formats(
+            self.config.workspace / "config" / "competition-formats.json"
+        )
+        format_version = stable_record_id(
+            "competition_formats", json_dumps(self.competition_formats)
+        )
+        if self.state.get_meta("competition_formats_version") != format_version:
+            self.state.sync_competition_formats(self.competition_formats)
+            self.state.set_meta("competition_formats_version", format_version)
+        if self.state.get_meta("result_reconciliation_schedule_version") != "1":
+            self.state.ensure_result_reconciliation_jobs(utc_now())
+            self.state.set_meta("result_reconciliation_schedule_version", "1")
 
     def close(self) -> None:
         self.state.close()
@@ -95,9 +112,11 @@ class CollectorService:
             self.data.append_normalized("quality_events", record, occurred)
         return record
 
-    def _observe_http(self, blob: dict[str, Any], *, context: str) -> bool:
+    def _observe_http(
+        self, blob: dict[str, Any], *, context: str, content_valid: bool = True
+    ) -> bool:
         observed = parse_iso(blob["observed_at"])
-        success = 200 <= int(blob["http_status"]) < 300
+        success = 200 <= int(blob["http_status"]) < 300 and content_valid
         self.emit_quality(
             "http_request",
             "success" if success else "failure",
@@ -106,6 +125,7 @@ class CollectorService:
                 "url": blob["url"],
                 "http_status": blob["http_status"],
                 "sha256": blob["sha256"],
+                "content_valid": content_valid,
             },
             at=observed,
         )
@@ -244,6 +264,8 @@ class CollectorService:
                     )
                 if status in {"new", "kickoff_changed"}:
                     self.state.schedule_fixture(identity, latest_observed, is_new=status == "new")
+
+            self.state.sync_competition_formats(self.competition_formats)
 
             full = (
                 len(pages) == len(DISCOVERY_SOURCES)
@@ -444,100 +466,415 @@ class CollectorService:
         return "done" if core_success else "partial"
 
     def _process_result_jobs(self, jobs: list[dict[str, Any]]) -> dict[str, int]:
-        counts = {"success": 0, "missing": 0, "failure": 0}
+        counts = {
+            "candidate": 0,
+            "verified": 0,
+            "isolated": 0,
+            "missing": 0,
+            "failure": 0,
+            "conflict": 0,
+            "cancelled": 0,
+        }
         if not jobs:
-            return counts
-        try:
-            completed_response = self.http.request("GET", COMPLETED_URL)
-            completed_blob = self.data.store_response(completed_response, default_extension="html")
-            self._observe_http(completed_blob, context="results:completed")
-        except CollectorHttpError as exc:
-            for job in jobs:
-                self.state.retry_job(job["job_id"], utc_now(), str(exc))
-            counts["failure"] = len(jobs)
-            return counts
-        if not completed_response.ok:
-            for job in jobs:
-                self.state.retry_job(
-                    job["job_id"], utc_now(), f"completed page HTTP {completed_response.status_code}"
-                )
-            counts["failure"] = len(jobs)
             return counts
 
         fixture_ids = {str(job["fixture_id"]) for job in jobs}
-        completed_scores = parse_completed_page(completed_response.content, fixture_ids)
         fixture_states = self.state.fixtures_by_ids(fixture_ids)
-        raw_blobs: list[dict[str, Any]] = [completed_blob]
+        candidate_scores: dict[str, set[tuple[int, int]]] = defaultdict(set)
+        for record in existing_result_records(self.config.data_dir, "candidates"):
+            try:
+                score = (int(record["home_goals"]), int(record["away_goals"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            candidate_scores[str(record.get("fixture_id"))].add(score)
+        verified_records: dict[str, dict[str, Any]] = {}
+        verified_scores: dict[str, set[tuple[int, int]]] = defaultdict(set)
+        for record in existing_result_records(self.config.data_dir, "verified"):
+            try:
+                score = (int(record["home_goals"]), int(record["away_goals"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            fixture_id = str(record.get("fixture_id"))
+            verified_records[fixture_id] = record
+            verified_scores[fixture_id].add(score)
+
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        feed_grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for job in jobs:
+            kickoff_at = str(job.get("payload", {}).get("kickoff_at") or "")
+            try:
+                url = result_page_url(kickoff_at, self.config.timezone_name)
+                feed_url = result_feed_url(kickoff_at)
+            except ValueError:
+                url = ""
+                feed_url = ""
+            grouped[url].append(job)
+            feed_grouped[feed_url].append(job)
+
+        page_results: dict[str, dict[str, Any]] = {}
+        raw_blobs: list[dict[str, Any]] = []
+        page_attempts: list[dict[str, Any]] = []
+        captures: list[dict[str, Any]] = []
+        feed_results: dict[str, dict[str, Any]] = {}
+
+        def fetch_sources(
+            urls: list[str], target: dict[str, dict[str, Any]], *, context: str, extension: str
+        ) -> None:
+            for url in urls:
+                if not url:
+                    target[url] = {"error": "fixture kickoff is missing or invalid"}
+                    page_attempts.append({"url": url, "status": "invalid_kickoff", "context": context})
+                    continue
+                try:
+                    response = self.http.request("GET", url)
+                    blob = self.data.store_response(response, default_extension=extension)
+                    raw_blobs.append(blob)
+                    blocked = is_blocked_result_page(response.content)
+                    self._observe_http(blob, context=context, content_valid=not blocked)
+                    if not response.ok:
+                        error = f"source HTTP {response.status_code}"
+                    elif blocked:
+                        error = "source was blocked"
+                    else:
+                        error = None
+                    target[url] = {"response": response, "blob": blob, "error": error}
+                    page_attempts.append(
+                        {
+                            "url": url,
+                            "context": context,
+                            "status": "success" if error is None else "failure",
+                            "raw_blob": blob,
+                            "error": error,
+                        }
+                    )
+                except CollectorHttpError as exc:
+                    target[url] = {"error": str(exc)}
+                    page_attempts.append(
+                        {"url": url, "context": context, "status": "request_failure", "error": str(exc)}
+                    )
+
+        fetch_sources(list(grouped), page_results, context="results:live", extension="html")
+        fetch_sources(
+            list(feed_grouped), feed_results, context="results:live-feed", extension="txt"
+        )
+
         for job in jobs:
             fixture_id = str(job["fixture_id"])
-            completed = completed_scores.get(fixture_id)
-            if completed is None:
-                self.state.complete_job(job["job_id"], "missing", utc_now(), "not present as completed")
-                self.emit_quality(
-                    "result_candidate", "missing", {"target": job["target"]}, fixture_id=fixture_id
-                )
-                counts["missing"] += 1
-                continue
+            target = str(job.get("target") or "unknown")
+            kickoff_at = str(job.get("payload", {}).get("kickoff_at") or "")
             try:
-                analysis_url = f"https://odds.500.com/fenxi/shuju-{fixture_id}.shtml"
+                live_url = result_page_url(kickoff_at, self.config.timezone_name)
+                feed_url = result_feed_url(kickoff_at)
+            except ValueError:
+                live_url = ""
+                feed_url = ""
+            page = page_results.get(live_url, {"error": "live result page was not requested"})
+            feed = feed_results.get(feed_url, {"error": "live result feed was not requested"})
+            final_reconciliation = target == "R+7d"
+            live = None
+            live_response = None
+            live_blob = None
+            parse_errors: list[ResultParseError] = []
+            source_errors = [str(source["error"]) for source in (page, feed) if source.get("error")]
+            if not page.get("error"):
+                try:
+                    live = parse_live_result(page["response"].content, fixture_id)
+                    live_response = page["response"]
+                    live_blob = page["blob"]
+                except ResultParseError as exc:
+                    parse_errors.append(exc)
+            if live is None and not feed.get("error"):
+                try:
+                    live = parse_live_result_feed(feed["response"].content, fixture_id)
+                    live_response = feed["response"]
+                    live_blob = feed["blob"]
+                except ResultParseError as exc:
+                    parse_errors.append(exc)
+
+            if live is None and not parse_errors:
+                now = utc_now()
+                attempts = int(job.get("attempts") or 0) + 1
+                error = "; ".join(source_errors) or "result sources were unavailable"
+                if attempts < 3 and not final_reconciliation:
+                    self.state.retry_job(job["job_id"], now, error)
+                else:
+                    self.state.complete_job(job["job_id"], "failed", now, error)
+                    if final_reconciliation:
+                        self.emit_quality(
+                            "result_unresolved",
+                            "failure",
+                            {"reason": error, "target": target},
+                            at=now,
+                            fixture_id=fixture_id,
+                            cutoff=target,
+                        )
+                self.emit_quality(
+                    "result_candidate",
+                    "failure",
+                    {"error": error, "target": target},
+                    at=now,
+                    fixture_id=fixture_id,
+                    cutoff=target,
+                )
+                counts["failure"] += 1
+                continue
+
+            if live is None:
+                exc = parse_errors[-1]
+                now = max(
+                    source["response"].response_received_at
+                    for source in (page, feed)
+                    if source.get("response") is not None
+                )
+                if any(error.code == "cancelled" for error in parse_errors):
+                    self.state.complete_job(job["job_id"], "cancelled", now, str(exc))
+                    self.state.cancel_future_result_jobs(
+                        fixture_id, now, except_job_id=job["job_id"]
+                    )
+                    self.emit_quality(
+                        "result_cancelled",
+                        "excluded",
+                        {"target": target, "source_errors": [error.code for error in parse_errors]},
+                        at=now,
+                        fixture_id=fixture_id,
+                        cutoff=target,
+                    )
+                    counts["cancelled"] += 1
+                    continue
+                normal_missing = exc.code in {"fixture_missing", "not_finished"}
+                status = "missing" if normal_missing else "failure"
+                self.state.complete_job(job["job_id"], status, now, f"{exc.code}: {exc}")
+                self.emit_quality(
+                    "result_candidate",
+                    status,
+                    {"error_code": exc.code, "error": str(exc), "target": target},
+                    at=now,
+                    fixture_id=fixture_id,
+                    cutoff=target,
+                )
+                if final_reconciliation:
+                    self.emit_quality(
+                        "result_unresolved",
+                        "failure",
+                        {"reason": exc.code, "target": target},
+                        at=now,
+                        fixture_id=fixture_id,
+                        cutoff=target,
+                    )
+                counts[status] += 1
+                continue
+
+            assert live_response is not None and live_blob is not None
+            live_source_url = str(live_blob["url"])
+            if any(error.code == "cancelled" for error in parse_errors):
+                now = live_response.response_received_at
+                self.state.complete_job(
+                    job["job_id"], "conflict", now, "result sources disagree on cancellation status"
+                )
+                self.emit_quality(
+                    "result_conflict",
+                    "failure",
+                    {
+                        "reason": "result sources disagree on cancellation status",
+                        "target": target,
+                    },
+                    at=now,
+                    fixture_id=fixture_id,
+                    cutoff=target,
+                )
+                counts["conflict"] += 1
+                continue
+
+            analysis_url = f"https://odds.500.com/fenxi/shuju-{fixture_id}.shtml"
+            analysis_blob: dict[str, Any] | None = None
+            analysis: AnalysisScore | None = None
+            analysis_error: str | None = None
+            observed = live_response.response_received_at
+            try:
                 analysis_response = self.http.request("GET", analysis_url)
                 analysis_blob = self.data.store_response(analysis_response, default_extension="html")
                 raw_blobs.append(analysis_blob)
-                self._observe_http(analysis_blob, context="results:analysis")
-                analysis = (
-                    parse_analysis_page(analysis_response.content, fixture_id)
-                    if analysis_response.ok
-                    else None
+                analysis_blocked = is_blocked_result_page(analysis_response.content)
+                self._observe_http(
+                    analysis_blob,
+                    context="results:analysis",
+                    content_valid=not analysis_blocked,
                 )
-                if analysis is None:
-                    raise ValueError("analysis page has no parseable score")
                 observed = analysis_response.response_received_at
-                candidate = make_candidate(
-                    completed,
-                    analysis,
-                    observed_at=observed,
-                    completed_blob=completed_blob,
-                    analysis_blob=analysis_blob,
+                if not analysis_response.ok:
+                    analysis_error = f"HTTP {analysis_response.status_code}"
+                elif analysis_blocked:
+                    analysis_error = "blocked page"
+                else:
+                    analysis = parse_analysis_page(analysis_response.content, fixture_id)
+                    if analysis is None:
+                        analysis_error = "analysis page has no matching parseable score"
+            except CollectorHttpError as exc:
+                analysis_error = str(exc)
+
+            if analysis is None:
+                consistency = "unavailable"
+            elif (analysis.home_goals, analysis.away_goals) == (live.home_goals, live.away_goals):
+                consistency = "passed"
+            else:
+                consistency = "conflict"
+
+            candidate = make_candidate(
+                live,
+                kickoff_at=kickoff_at or None,
+                observed_at=observed,
+                live_blob=live_blob,
+                analysis_blob=analysis_blob,
+                analysis_consistency=consistency,
+            )
+            score = (candidate["home_goals"], candidate["away_goals"])
+            prior_scores = candidate_scores[fixture_id]
+            evidence_conflict = len(prior_scores | {score}) > 1
+            if evidence_conflict or consistency == "conflict":
+                self.emit_quality(
+                    "result_conflict",
+                    "failure",
+                    {
+                        "existing_scores": sorted([list(value) for value in prior_scores]),
+                        "live_score": list(score),
+                        "analysis_score": (
+                            [analysis.home_goals, analysis.away_goals] if analysis else None
+                        ),
+                        "target": target,
+                    },
+                    at=observed,
+                    fixture_id=fixture_id,
+                    cutoff=target,
                 )
-                if candidate is None:
-                    raise ValueError("completed and analysis scores conflict")
-                if self.state.claim_record(candidate["record_id"], "ResultCandidate", observed):
-                    self.data.write_result("candidates", candidate, observed)
-                    self.data.append_normalized("result_candidates", candidate, observed)
-                fixture_state = fixture_states.get(fixture_id, {})
-                if fixture_state.get("competition_format") == "regular_time_only":
-                    verified = make_verified_result(
-                        fixture_id=fixture_id,
-                        home_goals=candidate["home_goals"],
-                        away_goals=candidate["away_goals"],
-                        source_url=analysis_url,
-                        confirmed_at=observed,
-                        method="500-two-source-regular-time-competition",
-                        notes="competition registry marks this fixture as regular_time_only",
-                        candidate_id=candidate["record_id"],
-                    )
-                    if self.state.claim_record(verified["record_id"], "VerifiedResult", observed):
-                        self.data.write_result("verified", verified, observed)
-                        self.data.append_normalized("verified_results", verified, observed)
+                counts["conflict"] += 1
+            candidate_scores[fixture_id].add(score)
+            if self.state.claim_record(candidate["record_id"], "ResultCandidate", observed):
+                self.data.write_result("candidates", candidate, observed)
+                self.data.append_normalized("result_candidates", candidate, observed)
+            self.emit_quality(
+                "result_candidate",
+                "success",
+                {
+                    "candidate_id": candidate["record_id"],
+                    "analysis_consistency": consistency,
+                    "analysis_error": analysis_error,
+                    "target": target,
+                },
+                at=observed,
+                fixture_id=fixture_id,
+                cutoff=target,
+            )
+            counts["candidate"] += 1
+
+            fixture_state = fixture_states.get(fixture_id, {})
+            competition_format = fixture_state.get("competition_format", "unknown")
+            identity_conflict = bool(fixture_state.get("identity_conflict"))
+            terminal = False
+            job_status = "candidate_only"
+            if consistency == "passed" and not evidence_conflict and not identity_conflict:
+                if competition_format == "regular_time_only":
+                    prior_verified = verified_records.get(fixture_id)
+                    verified_conflict = len(verified_scores[fixture_id] | {score}) > 1
+                    if verified_conflict:
+                        self.emit_quality(
+                            "result_conflict",
+                            "failure",
+                            {
+                                "verified_score": [
+                                    prior_verified["home_goals"],
+                                    prior_verified["away_goals"],
+                                ],
+                                "incoming_score": list(score),
+                                "target": target,
+                            },
+                            at=observed,
+                            fixture_id=fixture_id,
+                            cutoff=target,
+                        )
+                        counts["conflict"] += 1
+                        job_status = "conflict"
+                    else:
+                        verified = make_verified_result(
+                            fixture_id=fixture_id,
+                            home_goals=candidate["home_goals"],
+                            away_goals=candidate["away_goals"],
+                            source_url=live_source_url,
+                            confirmed_at=observed,
+                            method="500-two-page-regular-time-competition",
+                            notes="live and analysis scores agree; competition registry is regular_time_only",
+                            candidate_id=candidate["record_id"],
+                        )
+                        if self.state.claim_record(verified["record_id"], "VerifiedResult", observed):
+                            self.data.write_result("verified", verified, observed)
+                            self.data.append_normalized("verified_results", verified, observed)
+                            self.emit_quality(
+                                "verified_result",
+                                "accepted",
+                                {"record_id": verified["record_id"], "target": target},
+                                at=observed,
+                                fixture_id=fixture_id,
+                                competition=fixture_state.get("competition"),
+                                cutoff=target,
+                            )
+                            counts["verified"] += 1
+                        verified_records[fixture_id] = verified
+                        verified_scores[fixture_id].add(score)
+                        terminal = True
+                        job_status = "done"
                 else:
                     self.emit_quality(
                         "result_scope_ambiguous",
-                        "warning",
-                        {"competition_format": fixture_state.get("competition_format", "unknown")},
+                        "isolated",
+                        {"competition_format": competition_format, "target": target},
                         at=observed,
                         fixture_id=fixture_id,
+                        competition=fixture_state.get("competition"),
+                        cutoff=target,
                     )
-                self.state.complete_job(job["job_id"], "done", observed)
+                    counts["isolated"] += 1
+                    terminal = True
+                    job_status = "isolated"
+            elif identity_conflict:
                 self.emit_quality(
-                    "result_candidate", "success", {"candidate_id": candidate["record_id"]}, at=observed, fixture_id=fixture_id
+                    "result_identity_conflict",
+                    "isolated",
+                    {"target": target},
+                    at=observed,
+                    fixture_id=fixture_id,
+                    cutoff=target,
                 )
-                counts["success"] += 1
-            except (CollectorHttpError, ValueError) as exc:
-                self.state.complete_job(job["job_id"], "failed", utc_now(), str(exc))
+                counts["isolated"] += 1
+                terminal = True
+                job_status = "isolated"
+            elif consistency == "conflict" or evidence_conflict:
+                job_status = "conflict"
+
+            self.state.complete_job(job["job_id"], job_status, observed, analysis_error)
+            if terminal:
+                self.state.cancel_future_result_jobs(
+                    fixture_id, observed, except_job_id=job["job_id"]
+                )
+            elif final_reconciliation:
                 self.emit_quality(
-                    "result_candidate", "failure", {"error": str(exc)}, fixture_id=fixture_id
+                    "result_unresolved",
+                    "failure",
+                    {"reason": job_status, "target": target},
+                    at=observed,
+                    fixture_id=fixture_id,
+                    cutoff=target,
                 )
-                counts["failure"] += 1
+            captures.append(
+                {
+                    "job_id": job["job_id"],
+                    "fixture_id": fixture_id,
+                    "target": target,
+                    "candidate_id": candidate["record_id"],
+                    "analysis_consistency": consistency,
+                    "live_source_url": live_source_url,
+                    "job_status": job_status,
+                }
+            )
+
         finished = utc_now()
         manifest = {
             "schema_version": SCHEMA_VERSION,
@@ -545,11 +882,60 @@ class CollectorService:
             "run_id": make_run_id(finished),
             "finished_at": iso_utc(finished),
             "job_ids": [job["job_id"] for job in jobs],
+            "page_attempts": page_attempts,
             "raw_blobs": raw_blobs,
+            "captures": captures,
             "counts": counts,
         }
         self.data.write_manifest("results", manifest["run_id"], manifest, finished)
         return counts
+
+    def reconcile_results(self, start: datetime, end: datetime) -> dict[str, Any]:
+        if end <= start:
+            raise ValueError("until must be after since")
+        candidates = existing_result_records(self.config.data_dir, "candidates")
+        verified = existing_result_records(self.config.data_dir, "verified")
+        passed_candidates = {
+            str(record.get("fixture_id"))
+            for record in candidates
+            if record.get("analysis_consistency") == "passed"
+        }
+        verified_ids = {str(record.get("fixture_id")) for record in verified}
+        jobs: list[dict[str, Any]] = []
+        requested_at = utc_now()
+        for fixture in self.state.all_fixtures():
+            kickoff_text = fixture.get("kickoff_at")
+            if not kickoff_text:
+                continue
+            kickoff = parse_iso(kickoff_text)
+            if not (start <= kickoff < end) or kickoff > requested_at:
+                continue
+            fixture_id = str(fixture["fixture_id"])
+            if fixture_id in verified_ids:
+                continue
+            if fixture_id in passed_candidates and fixture.get("competition_format") != "regular_time_only":
+                continue
+            jobs.append(
+                {
+                    "job_id": f"reconcile:{fixture_id}:{make_run_id(requested_at)}",
+                    "job_type": "result",
+                    "fixture_id": fixture_id,
+                    "target": "reconcile",
+                    "attempts": 0,
+                    "payload": {"fixture": fixture["identity"], "kickoff_at": kickoff_text},
+                }
+            )
+        totals: dict[str, int] = defaultdict(int)
+        for index in range(0, len(jobs), 20):
+            for key, value in self._process_result_jobs(jobs[index : index + 20]).items():
+                totals[key] += value
+        return {
+            "status": "completed",
+            "start": iso_utc(start),
+            "end": iso_utc(end),
+            "fixtures_queued": len(jobs),
+            "counts": dict(totals),
+        }
 
     def run_once(self, *, now: datetime | None = None) -> tuple[int, dict[str, Any]]:
         started = now or utc_now()
@@ -620,7 +1006,13 @@ class CollectorService:
             )
         return (2 if conflicts else 0), {"imported": len(imported), "conflicts": conflicts}
 
-    def smoke_live(self, *, active_fixture_id: str, completed_fixture_id: str) -> tuple[int, dict[str, Any]]:
+    def smoke_live(
+        self,
+        *,
+        active_fixture_id: str,
+        completed_fixture_id: str,
+        completed_kickoff_at: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         fixture = {"fixture_id": active_fixture_id, "kickoff_at": None}
         market_results: dict[str, Any] = {}
         exit_code = 0
@@ -638,22 +1030,33 @@ class CollectorService:
             if market in CORE_MARKETS and capture.status != "success":
                 exit_code = 1
 
-        result_checks: dict[str, Any] = {"completed_page": None, "analysis_page": None}
+        result_checks: dict[str, Any] = {"live_page": None, "analysis_page": None}
         try:
-            completed_response = self.http.request("GET", COMPLETED_URL)
-            completed_blob = self.data.store_response(completed_response, default_extension="html")
-            self._observe_http(completed_blob, context="smoke:results:completed")
-            completed_scores = (
-                parse_completed_page(completed_response.content, {completed_fixture_id})
-                if completed_response.ok
-                else {}
+            fixture_state = self.state.fixtures_by_ids({completed_fixture_id}).get(
+                completed_fixture_id, {}
             )
-            result_checks["completed_page"] = {
-                "status": "success" if completed_fixture_id in completed_scores else "missing",
-                "http_status": completed_response.status_code,
-                "raw_blob": completed_blob,
+            kickoff_at = completed_kickoff_at or fixture_state.get("kickoff_at")
+            if not kickoff_at:
+                kickoff_at = iso_utc(utc_now())
+            live_url = result_page_url(str(kickoff_at), self.config.timezone_name)
+            live_response = self.http.request("GET", live_url)
+            live_blob = self.data.store_response(live_response, default_extension="html")
+            blocked = is_blocked_result_page(live_response.content)
+            self._observe_http(
+                live_blob, context="smoke:results:live", content_valid=not blocked
+            )
+            live = (
+                parse_live_result(live_response.content, completed_fixture_id)
+                if live_response.ok and not blocked
+                else None
+            )
+            result_checks["live_page"] = {
+                "status": "success" if live else "missing",
+                "http_status": live_response.status_code,
+                "source_url": live_url,
+                "raw_blob": live_blob,
             }
-            if completed_fixture_id not in completed_scores:
+            if live is None:
                 exit_code = 1
 
             analysis_url = f"https://odds.500.com/fenxi/shuju-{completed_fixture_id}.shtml"
@@ -666,9 +1069,12 @@ class CollectorService:
                 "http_status": analysis_response.status_code,
                 "raw_blob": analysis_blob,
             }
-            if analysis is None:
+            if analysis is None or live is None or (
+                analysis.home_goals,
+                analysis.away_goals,
+            ) != (live.home_goals, live.away_goals):
                 exit_code = 1
-        except CollectorHttpError as exc:
+        except (CollectorHttpError, ResultParseError, ValueError) as exc:
             result_checks["error"] = str(exc)
             exit_code = 1
 
@@ -708,6 +1114,44 @@ def rebuild_state(config: CollectorConfig) -> dict[str, Any]:
                 rebuilt.schedule_fixture(identity, observed, is_new=status == "new")
                 fixtures += status == "new"
             processed += 1
+        formats = load_competition_formats(config.workspace / "config" / "competition-formats.json")
+        rebuilt.sync_competition_formats(formats)
+        rebuilt.set_meta(
+            "competition_formats_version",
+            stable_record_id("competition_formats", json_dumps(formats)),
+        )
+        rebuilt.ensure_result_reconciliation_jobs(utc_now())
+        rebuilt.set_meta("result_reconciliation_schedule_version", "1")
+        for record in existing_result_records(config.data_dir, "candidates"):
+            try:
+                observed = parse_iso(str(record["observed_at"]))
+                fixture_id = str(record["fixture_id"])
+            except (KeyError, ValueError):
+                continue
+            rebuilt.claim_record(str(record["record_id"]), "ResultCandidate", observed)
+            rebuilt.add_event(
+                "result_candidate",
+                "success",
+                {"candidate_id": record["record_id"], "target": "rebuilt"},
+                occurred_at=observed,
+                fixture_id=fixture_id,
+                cutoff="rebuilt",
+            )
+        for record in existing_result_records(config.data_dir, "verified"):
+            try:
+                confirmed = parse_iso(str(record["confirmed_at"]))
+                fixture_id = str(record["fixture_id"])
+            except (KeyError, ValueError):
+                continue
+            rebuilt.claim_record(str(record["record_id"]), "VerifiedResult", confirmed)
+            rebuilt.add_event(
+                "verified_result",
+                "accepted",
+                {"record_id": record["record_id"], "target": "rebuilt"},
+                occurred_at=confirmed,
+                fixture_id=fixture_id,
+                cutoff="rebuilt",
+            )
         rebuilt.set_meta("state_rebuilt_at", iso_utc(utc_now()))
     finally:
         rebuilt.close()

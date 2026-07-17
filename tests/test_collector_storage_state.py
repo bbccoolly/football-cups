@@ -66,6 +66,11 @@ def test_scheduler_marks_old_cutoffs_and_versions_kickoff_changes(tmp_path) -> N
         assert statuses["T-48h"] == "missed_before_discovery"
         assert statuses["T-24h"] == "pending"
         assert statuses["first_seen"] == "pending"
+        result_targets = {
+            row["target"]
+            for row in state.connection.execute("SELECT target FROM jobs WHERE job_type='result'")
+        }
+        assert {"T+3h", "T+6h", "T+24h", "R+2d", "R+7d"}.issubset(result_targets)
 
         changed = identity | {"kickoff_at": iso_utc(now + timedelta(hours=26))}
         assert state.upsert_fixture(changed, now + timedelta(minutes=1), identity_conflict=False) == "kickoff_changed"
@@ -74,6 +79,25 @@ def test_scheduler_marks_old_cutoffs_and_versions_kickoff_changes(tmp_path) -> N
             "SELECT COUNT(*) FROM jobs WHERE status='superseded'"
         ).fetchone()[0]
         assert superseded > 0
+
+
+def test_competition_formats_sync_existing_fixtures(tmp_path) -> None:
+    config = config_for(tmp_path)
+    now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    identity = {
+        "fixture_id": "123",
+        "competition_name": "League",
+        "competition_id": "30",
+        "home_team_id": "10",
+        "away_team_id": "20",
+        "kickoff_at": iso_utc(now + timedelta(hours=2)),
+        "buy_end_at": None,
+    }
+    with StateStore(config) as state:
+        state.upsert_fixture(identity, now, identity_conflict=False)
+        assert state.sync_competition_formats({"League": "regular_time_only"}) == 1
+        assert state.all_fixtures()[0]["competition_format"] == "regular_time_only"
+        assert state.sync_competition_formats({"League": "regular_time_only"}) == 0
 
 
 def test_record_claim_is_idempotent(tmp_path) -> None:
@@ -106,6 +130,20 @@ def test_state_rebuild_uses_discovery_file_facts(tmp_path) -> None:
         },
         now,
     )
+    candidate = {
+        "record_id": "candidate-123",
+        "record_type": "ResultCandidate",
+        "fixture_id": "123",
+        "observed_at": iso_utc(now + timedelta(days=3)),
+    }
+    verified = {
+        "record_id": "verified-123",
+        "record_type": "VerifiedResult",
+        "fixture_id": "123",
+        "confirmed_at": iso_utc(now + timedelta(days=3, hours=1)),
+    }
+    store.write_result("candidates", candidate, now + timedelta(days=3))
+    store.write_result("verified", verified, now + timedelta(days=3, hours=1))
     with StateStore(config):
         pass
     result = rebuild_state(config)
@@ -114,6 +152,13 @@ def test_state_rebuild_uses_discovery_file_facts(tmp_path) -> None:
     assert result["previous_state_backup"] is not None
     with StateStore(config) as state:
         assert state.all_fixtures()[0]["fixture_id"] == "123"
+        event_types = {
+            row["event_type"]
+            for row in state.connection.execute(
+                "SELECT event_type FROM events WHERE fixture_id='123'"
+            )
+        }
+        assert {"result_candidate", "verified_result"}.issubset(event_types)
 
 
 def test_oss_backup_requires_complete_marker_and_restores_hashes(tmp_path) -> None:

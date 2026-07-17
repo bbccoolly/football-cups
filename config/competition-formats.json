@@ -1,5 +1,12 @@
 {
   "schema_version": 1,
-  "competitions": {}
+  "competitions": {
+    "美职足": "regular_time_only",
+    "巴甲": "regular_time_only",
+    "挪超": "regular_time_only",
+    "瑞超": "regular_time_only",
+    "欧冠": "may_have_extra_time",
+    "欧罗巴": "may_have_extra_time",
+    "世界杯": "may_have_extra_time"
+  }
 }
-

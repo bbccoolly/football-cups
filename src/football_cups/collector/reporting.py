@@ -11,7 +11,7 @@ from . import SCHEMA_VERSION
 from .config import CollectorConfig
 from .state import StateStore
 from .storage import DataStore, json_dumps, make_run_id
-from .timeutil import iso_utc, utc_now
+from .timeutil import iso_utc, parse_iso, utc_now
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
@@ -23,6 +23,100 @@ def day_bounds(day: date, timezone_name: str) -> tuple[datetime, datetime]:
     start = datetime.combine(day, time.min, tzinfo=zone).astimezone(timezone.utc)
     end = (datetime.combine(day, time.min, tzinfo=zone) + timedelta(days=1)).astimezone(timezone.utc)
     return start, end
+
+
+def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[str, Any]:
+    deadline_start = start - timedelta(hours=24)
+    deadline_end = end - timedelta(hours=24)
+    fixture_rows = state.connection.execute(
+        "SELECT fixture_id, kickoff_at FROM fixtures "
+        "WHERE kickoff_at IS NOT NULL AND kickoff_at>=? AND kickoff_at<?",
+        (iso_utc(deadline_start), iso_utc(deadline_end)),
+    ).fetchall()
+    kickoff_by_fixture = {
+        str(row["fixture_id"]): parse_iso(str(row["kickoff_at"])) for row in fixture_rows
+    }
+    fixture_ids = set(kickoff_by_fixture)
+    candidate_at: dict[str, datetime] = {}
+    verified_ids: set[str] = set()
+    unresolved_ids: set[str] = set()
+    conflict_ids: set[str] = set()
+    ambiguous_ids: set[str] = set()
+    cancelled_ids: set[str] = set()
+    target_attempts: dict[str, set[str]] = defaultdict(set)
+    target_success: dict[str, set[str]] = defaultdict(set)
+    if fixture_ids:
+        placeholders = ",".join("?" for _ in fixture_ids)
+        rows = state.connection.execute(
+            f"SELECT fixture_id, event_type, status, occurred_at, cutoff, details_json FROM events "
+            f"WHERE fixture_id IN ({placeholders}) AND occurred_at<? "
+            "AND event_type IN ('result_candidate','verified_result','result_unresolved',"
+            "'result_conflict','result_scope_ambiguous','result_cancelled')",
+            [*sorted(fixture_ids), iso_utc(end)],
+        ).fetchall()
+        for row in rows:
+            fixture_id = str(row["fixture_id"])
+            event_type = str(row["event_type"])
+            status = str(row["status"])
+            occurred_at = parse_iso(str(row["occurred_at"]))
+            if event_type == "result_candidate" and status == "success":
+                prior = candidate_at.get(fixture_id)
+                if prior is None or occurred_at < prior:
+                    candidate_at[fixture_id] = occurred_at
+            if event_type == "result_candidate":
+                details = json.loads(row["details_json"])
+                target = str(row["cutoff"] or details.get("target") or "unknown")
+                target_attempts[target].add(fixture_id)
+                if status == "success":
+                    target_success[target].add(fixture_id)
+            elif event_type == "verified_result" and status == "accepted":
+                verified_ids.add(fixture_id)
+            elif event_type == "result_unresolved":
+                unresolved_ids.add(fixture_id)
+            elif event_type == "result_conflict":
+                conflict_ids.add(fixture_id)
+            elif event_type == "result_scope_ambiguous":
+                ambiguous_ids.add(fixture_id)
+            elif event_type == "result_cancelled":
+                cancelled_ids.add(fixture_id)
+    eligible_fixture_ids = fixture_ids - cancelled_ids
+    candidate_within_24h = {
+        fixture_id
+        for fixture_id, observed_at in candidate_at.items()
+        if fixture_id in eligible_fixture_ids
+        and observed_at <= kickoff_by_fixture[fixture_id] + timedelta(hours=24)
+    }
+    verified_ids.difference_update(conflict_ids)
+    verified_ids.intersection_update(eligible_fixture_ids)
+
+    strict_by_cutoff: dict[str, int] = {}
+    if verified_ids:
+        placeholders = ",".join("?" for _ in verified_ids)
+        rows = state.connection.execute(
+            f"SELECT cutoff, count(DISTINCT fixture_id) AS count FROM events "
+            f"WHERE event_type='snapshot_batch' AND status='strict_eligible' "
+            f"AND occurred_at<? AND fixture_id IN ({placeholders}) GROUP BY cutoff",
+            [iso_utc(end), *sorted(verified_ids)],
+        ).fetchall()
+        strict_by_cutoff = {str(row["cutoff"] or "unknown"): int(row["count"]) for row in rows}
+
+    denominator = len(eligible_fixture_ids)
+    return {
+        "result_candidate_coverage_24h": _ratio(len(candidate_within_24h), denominator),
+        "verified_result_coverage": _ratio(len(verified_ids), denominator),
+        "result_fixture_denominator": denominator,
+        "result_candidate_within_24h_count": len(candidate_within_24h),
+        "verified_result_count": len(verified_ids),
+        "result_unresolved_count": len(unresolved_ids),
+        "result_conflict_count": len(conflict_ids),
+        "result_scope_ambiguous_count": len(ambiguous_ids),
+        "result_cancelled_count": len(cancelled_ids),
+        "result_success_rate_by_target": {
+            target: _ratio(len(target_success[target]), len(fixtures))
+            for target, fixtures in sorted(target_attempts.items())
+        },
+        "strict_fixture_result_count_by_cutoff": strict_by_cutoff,
+    }
 
 
 def build_daily_report(
@@ -53,6 +147,7 @@ def build_daily_report(
     parser_failure = event_counts[("parser", "failure")]
     result_success = event_counts[("result_candidate", "success")]
     result_missing = event_counts[("result_candidate", "missing")]
+    result_metrics = _result_metrics(state, start, end)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -72,9 +167,8 @@ def build_daily_report(
                 http_success, http_success + http_failure
             ),
             "parser_success_rate": _ratio(parser_success, parser_success + parser_failure),
-            "result_candidate_coverage": _ratio(
-                result_success, result_success + result_missing
-            ),
+            "result_candidate_coverage": result_metrics["result_candidate_coverage_24h"],
+            **result_metrics,
         },
         "event_counts": {
             f"{kind}:{status}": count for (kind, status), count in sorted(event_counts.items())
@@ -114,6 +208,7 @@ def build_window_report(
     parser_failure = event_counts[("parser", "failure")]
     result_success = event_counts[("result_candidate", "success")]
     result_missing = event_counts[("result_candidate", "missing")]
+    result_metrics = _result_metrics(state, start, end)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -135,9 +230,8 @@ def build_window_report(
                 http_success, http_success + http_failure
             ),
             "parser_success_rate": _ratio(parser_success, parser_success + parser_failure),
-            "result_candidate_coverage": _ratio(
-                result_success, result_success + result_missing
-            ),
+            "result_candidate_coverage": result_metrics["result_candidate_coverage_24h"],
+            **result_metrics,
         },
         "event_counts": {
             f"{kind}:{status}": count for (kind, status), count in sorted(event_counts.items())
@@ -176,6 +270,9 @@ def write_window_report(
         f"- HTTP 成功率：{metrics['http_acquisition_success_rate']}",
         f"- 解析成功率：{metrics['parser_success_rate']}",
         f"- 候选赛果覆盖率：{metrics['result_candidate_coverage']}",
+        f"- 已验证赛果覆盖率：{metrics['verified_result_coverage']}",
+        f"- 未解决赛果：{metrics['result_unresolved_count']}",
+        f"- 赛果冲突：{metrics['result_conflict_count']}",
         "",
         "## 事件",
         "",
@@ -209,6 +306,9 @@ def write_daily_report(
         f"- HTTP 成功率：{metrics['http_acquisition_success_rate']}",
         f"- 解析成功率：{metrics['parser_success_rate']}",
         f"- 候选赛果覆盖率：{metrics['result_candidate_coverage']}",
+        f"- 已验证赛果覆盖率：{metrics['verified_result_coverage']}",
+        f"- 未解决赛果：{metrics['result_unresolved_count']}",
+        f"- 赛果冲突：{metrics['result_conflict_count']}",
         "",
         "## 事件",
         "",

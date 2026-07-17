@@ -95,9 +95,13 @@ def base_record(record_type: str, **values):
         base_record(
             "ResultCandidate",
             observed_at="2026-07-16T01:00:00Z",
+            kickoff_at="2026-07-15T22:00:00Z",
             home_goals=1,
             away_goals=0,
             scope="candidate",
+            status_code="4",
+            live_page_sha256="live",
+            analysis_consistency="passed",
             source_urls=[],
         ),
         base_record(
@@ -108,6 +112,7 @@ def base_record(record_type: str, **values):
             scope="90-minutes-including-stoppage",
             source_url="https://example.test/result",
             verification_method="manual",
+            verification_status="accepted",
         ),
         base_record(
             "QualityEvent",
@@ -196,9 +201,13 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             "ResultCandidate",
             record_id="result-candidate",
             observed_at="2026-07-16T13:00:00Z",
+            kickoff_at="2026-07-16T10:00:00Z",
             home_goals=2,
             away_goals=1,
             scope="candidate-full-time-scope-not-yet-confirmed",
+            status_code="4",
+            live_page_sha256="live-page",
+            analysis_consistency="passed",
             source_urls=["https://example.test/result"],
         ),
         base_record(
@@ -210,6 +219,7 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             scope="90-minutes-including-stoppage",
             source_url="https://example.test/result",
             verification_method="manual-import",
+            verification_status="accepted",
         ),
     ]
     path = normalized / "bookmaker_market_rows.jsonl"
@@ -221,7 +231,7 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
         raw.execute("DROP SCHEMA IF EXISTS football CASCADE")
 
     with connect(config) as connection:
-        assert apply_migrations(connection) == ["001", "002"]
+        assert apply_migrations(connection) == ["001", "002", "003"]
         with connect(config) as competing:
             with import_lock(connection):
                 with pytest.raises(ImportAlreadyRunning):
@@ -256,6 +266,28 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             """
         ).fetchone()
         assert typed_results == {"candidates": 1, "verified": 1}
+        current_verified = connection.execute(
+            "SELECT count(*) AS count FROM football.current_verified_results"
+        ).fetchone()
+        assert current_verified["count"] == 1
+        assert insert_record(
+            connection,
+            base_record(
+                "QualityEvent",
+                record_id="result-conflict",
+                occurred_at="2026-07-16T15:00:00Z",
+                event_type="result_conflict",
+                status="failure",
+                details={"reason": "source disagreement"},
+            ),
+            source_file="normalized/test-conflict.jsonl",
+            source_line=1,
+        )
+        connection.commit()
+        current_after_conflict = connection.execute(
+            "SELECT count(*) AS count FROM football.current_verified_results"
+        ).fetchone()
+        assert current_after_conflict["count"] == 0
 
         checkpoint_before = connection.execute(
             "SELECT byte_offset, line_number FROM football.import_checkpoints"

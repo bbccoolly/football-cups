@@ -58,12 +58,24 @@ def database_status(connection: Connection) -> dict[str, Any]:
     unsupported = connection.execute(
         "SELECT count(*) AS count FROM football.unsupported_records"
     ).fetchone()
+    current_verified = connection.execute(
+        "SELECT count(*) AS count FROM football.current_verified_results"
+    ).fetchone()
+    strict_results_by_cutoff = {
+        str(row["target"]): int(row["count"])
+        for row in connection.execute(
+            "SELECT target, count(DISTINCT fixture_id) AS count "
+            "FROM football.strict_fixture_results_by_cutoff GROUP BY target ORDER BY target"
+        ).fetchall()
+    }
     return {
         "migrations": [dict(row) for row in migrations],
         "counts": counts,
         "record_types": record_types,
         "checkpoints": dict(checkpoint),
         "unsupported_records": int(unsupported["count"]),
+        "current_verified_results": int(current_verified["count"]),
+        "strict_fixture_results_by_cutoff": strict_results_by_cutoff,
         "latest_import_run": dict(latest_run) if latest_run else None,
     }
 

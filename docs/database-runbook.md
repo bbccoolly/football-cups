@@ -1,7 +1,7 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.1
-> 更新日期：2026-07-16
+> 版本：V1.2
+> 更新日期：2026-07-17
 
 ## 1. 本地运行方式
 
@@ -43,6 +43,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 ```
 
 `init` 只执行尚未应用的迁移，并拒绝已经应用后又被修改的 SQL 文件。`import-files` 先核对不可变 manifest，再按 JSONL 检查点增量导入。`import-jsonl` 只用于诊断，不替代日常 `import-files`。
+
+`status` 额外返回 `current_verified_results` 和 `strict_fixture_results_by_cutoff`。后者按不同预测切点统计不同 fixture，不能把同场多个切点相加作为阶段 4 的 500 场门禁。
 
 退出码：
 

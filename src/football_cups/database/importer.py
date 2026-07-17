@@ -373,24 +373,30 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
         connection.execute(
             """
             INSERT INTO football.result_candidates (
-                record_id, fixture_id, observed_at, home_goals, away_goals,
-                half_time_score_raw, status_raw, scope, completed_page_sha256,
-                analysis_page_sha256, source_urls
+                record_id, fixture_id, observed_at, kickoff_at, home_goals, away_goals,
+                half_time_score_raw, status_raw, status_code, scope,
+                completed_page_sha256, live_page_sha256, analysis_page_sha256,
+                analysis_consistency, source_urls
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s
             ) ON CONFLICT (record_id) DO NOTHING
             """,
             (
                 record_id,
                 fixture_id,
                 parse_time(record.get("observed_at")),
+                parse_time(record.get("kickoff_at")),
                 record.get("home_goals"),
                 record.get("away_goals"),
                 record.get("half_time_score_raw"),
                 record.get("status_raw"),
+                record.get("status_code"),
                 record.get("scope"),
                 record.get("completed_page_sha256"),
+                record.get("live_page_sha256"),
                 record.get("analysis_page_sha256"),
+                record.get("analysis_consistency"),
                 Jsonb(record.get("source_urls") or []),
             ),
         )
@@ -401,9 +407,11 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
             """
             INSERT INTO football.verified_results (
                 record_id, fixture_id, confirmed_at, home_goals, away_goals,
-                scope, source_url, verification_method, notes, candidate_id
+                scope, source_url, verification_method, verification_status,
+                notes, candidate_id, supersedes_record_id, correction_reason
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
             ) ON CONFLICT (record_id) DO NOTHING
             """,
             (
@@ -415,8 +423,11 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 record.get("scope"),
                 record.get("source_url"),
                 record.get("verification_method"),
+                record.get("verification_status") or "accepted",
                 record.get("notes"),
                 record.get("candidate_id"),
+                record.get("supersedes_record_id"),
+                record.get("correction_reason"),
             ),
         )
         return

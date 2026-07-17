@@ -1,7 +1,7 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V1.3
-> 更新日期：2026-07-16
+> 版本：V1.4
+> 更新日期：2026-07-17
 
 ## 1. 安装
 
@@ -82,6 +82,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 .\.venv\Scripts\football-cups-collector.exe backup --workspace .
 .\.venv\Scripts\football-cups-collector.exe backup-oss --workspace .
 .\.venv\Scripts\football-cups-collector.exe health --workspace .
+.\.venv\Scripts\football-cups-collector.exe reconcile-results --workspace . --since <RFC3339> --until <RFC3339>
 ```
 
 - 每日确认最后心跳、发现轮次、失败、来源缺盘、切点和磁盘。
@@ -131,12 +132,20 @@ $env:FOOTBALL_CUPS_OSS_BACKUP_DIR = 'G:\football-cups-oss-layout'
 - SQLite 损坏：保留损坏文件，运行 `rebuild-state`；已错过的历史切点只能标记缺口。
 - 页面结构变化：保留原始响应，停止受影响解析，不手工改写历史数据。
 
-## 7. 人工赛果确认
+## 7. 全自动赛果闭环
 
-对杯赛或未知赛事准备 CSV：
+日期直播页确定性比分自动形成候选；HTML 清单切换后自动读取页面自身的日期 Full 数据流。普通联赛在分析页一致后自动形成已验证赛果。可能加时、未知、身份冲突或比分冲突的比赛自动隔离，不要求人工确认，也不得进入训练。
 
-```powershell
-.\.venv\Scripts\football-cups-collector.exe verify-results --workspace . --input verified-results.csv
+检查日报中的以下指标：
+
+```text
+result_candidate_coverage_24h
+verified_result_coverage
+result_unresolved_count
+result_conflict_count
+result_scope_ambiguous_count
+result_success_rate_by_target
+strict_fixture_result_count_by_cutoff
 ```
 
-比分必须是常规时间 90 分钟及补时。冲突记录不会覆盖已有结果。
+`T+24h` 后仍缺少候选或一致性证据时，采集器每日补偿至 `T+7d`。`reconcile-results` 可立即重查历史缺口，但新证据使用真实观察时间，不能倒填。`verify-results` 仅为旧接口兼容，不属于正式操作流程。

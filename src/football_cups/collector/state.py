@@ -287,21 +287,68 @@ class StateStore:
                 payload={"fixture": identity, "kickoff_at": kickoff_text},
                 now=observed_at,
             )
-        for hours in (3, 6, 24):
+        self._schedule_result_jobs(identity, observed_at)
+        self.connection.commit()
+
+    def _schedule_result_jobs(self, identity: dict[str, Any], observed_at: datetime) -> None:
+        kickoff_text = identity.get("kickoff_at")
+        if not kickoff_text:
+            return
+        fixture_id = str(identity["fixture_id"])
+        kickoff = parse_iso(kickoff_text)
+        version = kickoff.strftime("%Y%m%dT%H%M%SZ")
+        targets = [(f"T+{hours}h", hours, 40) for hours in (3, 6, 24)]
+        targets.extend((f"R+{days}d", days * 24, 50) for days in range(2, 8))
+        for target, hours, priority in targets:
+            due_at = kickoff + timedelta(hours=hours)
+            status = "expired" if target.startswith("R+") and observed_at > kickoff + timedelta(days=7) else "pending"
             self._insert_job(
-                job_id=f"result:{fixture_id}:{version}:T+{hours}h",
+                job_id=f"result:{fixture_id}:{version}:{target}",
                 job_type="result",
                 fixture_id=fixture_id,
-                target=f"T+{hours}h",
-                priority=40,
-                due_at=kickoff + timedelta(hours=hours),
+                target=target,
+                priority=priority,
+                due_at=due_at,
                 window_start=None,
                 window_end=None,
-                status="pending",
+                status=status,
                 payload={"fixture": identity, "kickoff_at": kickoff_text},
                 now=observed_at,
             )
+
+    def ensure_result_reconciliation_jobs(self, now: datetime) -> int:
+        before = self.connection.total_changes
+        for fixture in self.all_fixtures():
+            self._schedule_result_jobs(fixture["identity"], now)
         self.connection.commit()
+        return self.connection.total_changes - before
+
+    def sync_competition_formats(self, formats: dict[str, str]) -> int:
+        changed = 0
+        rows = self.connection.execute(
+            "SELECT fixture_id, competition, competition_format FROM fixtures"
+        ).fetchall()
+        for row in rows:
+            expected = formats.get(str(row["competition"] or ""), "unknown")
+            if row["competition_format"] == expected:
+                continue
+            self.connection.execute(
+                "UPDATE fixtures SET competition_format=? WHERE fixture_id=?",
+                (expected, row["fixture_id"]),
+            )
+            changed += 1
+        self.connection.commit()
+        return changed
+
+    def cancel_future_result_jobs(self, fixture_id: str, now: datetime, *, except_job_id: str) -> int:
+        cursor = self.connection.execute(
+            "UPDATE jobs SET status='not_needed', updated_at=? "
+            "WHERE fixture_id=? AND job_type='result' AND status='pending' "
+            "AND job_id<>? AND due_at>?",
+            (iso_utc(now), str(fixture_id), except_job_id, iso_utc(now)),
+        )
+        self.connection.commit()
+        return cursor.rowcount
 
     def _insert_job(
         self,

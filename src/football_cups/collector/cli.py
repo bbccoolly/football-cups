@@ -56,6 +56,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "rebuild-state",
         "health",
         "smoke-live",
+        "reconcile-results",
     ):
         subparser = subparsers.add_parser(name)
         add_workspace_argument(subparser)
@@ -70,6 +71,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if name == "smoke-live":
             subparser.add_argument("--active-fixture-id", required=True)
             subparser.add_argument("--completed-fixture-id", required=True)
+            subparser.add_argument("--completed-kickoff", help="RFC3339 kickoff; defaults to state or now")
+        if name == "reconcile-results":
+            subparser.add_argument("--since", required=True, help="RFC3339 inclusive kickoff start")
+            subparser.add_argument("--until", required=True, help="RFC3339 exclusive kickoff end")
     verify = subparsers.add_parser("verify-results")
     add_workspace_argument(verify)
     verify.add_argument("--input", type=Path, required=True)
@@ -372,9 +377,16 @@ def main(argv: list[str] | None = None) -> int:
                 code, result = service.smoke_live(
                     active_fixture_id=str(args.active_fixture_id),
                     completed_fixture_id=str(args.completed_fixture_id),
+                    completed_kickoff_at=args.completed_kickoff,
                 )
                 print(json_dumps(result, indent=2))
                 return code
+            if args.command == "reconcile-results":
+                start = parse_iso(args.since)
+                end = parse_iso(args.until)
+                result = service.reconcile_results(start, end)
+                print(json_dumps(result, indent=2))
+                return 0 if not result["counts"].get("failure") else 1
             if args.command == "report-daily":
                 local_today = datetime.now(ZoneInfo(config.timezone_name)).date()
                 report_day = date.fromisoformat(args.date) if args.date else local_today
