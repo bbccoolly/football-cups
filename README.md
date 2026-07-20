@@ -50,6 +50,16 @@ py -3.11 -m venv .venv
   --source-url <evidence-url> --note <audit-note>
 ```
 
+项目负责人确认既有候选比分属于常规时间时，只声明口径，不输入比分：
+
+```powershell
+.\.venv\Scripts\football-cups-collector.exe confirm-candidate-results `
+  --workspace . --fixture-id <id> --confirm-90-minutes `
+  --note "Project owner confirmed the candidate score as a regular-time result"
+```
+
+命令会从文件事实层读取候选并整批预检；人工声明单独计量，不提高自动赛果验收指标。成功后按数据库手册执行两次增量导入，第二次新增必须为0。
+
 当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。本地默认运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
 
 迁移到阿里云前必须先完成精确窗口报告、备份恢复和云端 smoke test，步骤见 `docs/cloud-migration-plan.md`。

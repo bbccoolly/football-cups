@@ -1,6 +1,6 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V2.0
+> 版本：V2.1
 > 更新日期：2026-07-20
 
 ## 1. 安装
@@ -182,13 +182,13 @@ $env:FOOTBALL_CUPS_DATA_DIR = 'D:\football-cups-restore-test\data\500'
 - SQLite 损坏：保留损坏文件，运行 `rebuild-state`；已错过的历史切点只能标记缺口。
 - 页面结构变化：保留原始响应，停止受影响解析，不手工改写历史数据。
 
-## 8. 全自动赛果闭环
+## 8. 赛果闭环
 
-日期直播页确定性比分自动形成候选；HTML 清单切换后自动读取页面自身的日期 Full 数据流。普通联赛在分析页一致后自动形成已验证赛果。若直播源持续遗漏 fixture，采集器会尝试 `shuju` 与 `ouzhi` 分析端点双证据 fallback；两端比分一致且赛事 ID 登记为 `regular_time_only` 时才自动验证。可能加时、未知、身份冲突或比分冲突的比赛自动隔离，不要求人工确认，也不得进入训练。
+日期直播页确定性比分自动形成候选；HTML 清单切换后自动读取页面自身的日期 Full 数据流。普通联赛在分析页一致后自动形成已验证赛果。若直播源持续遗漏 fixture，采集器会尝试 `shuju` 与 `ouzhi` 分析端点双证据 fallback；两端比分一致且赛事 ID 登记为 `regular_time_only` 时才自动验证。可能加时、未知、身份冲突或比分冲突的比赛默认隔离；不创建人工待办，但项目负责人可按 D-028 主动声明现有唯一候选的90分钟口径。
 
 中国体彩官方源用于补充明确 90 分钟口径。先执行 `--dry-run` 核对 queued、mapping、candidate 和 verified 计数，再执行 `--apply` 写入 `SportteryScopeEvidence`、`SportteryInventoryBatch`、`SportteryFixtureLink`、`SportteryResultObservation`、官方候选和已验证赛果。官方清单分页不完整、scope 文本不可见、详情不一致或 WAF 阻断时不得自动验证。官方来源失败单独统计，不计入 500 盘口采集失败。
 
-`run-once` 已接入低频官方补偿：每天最多一次，默认扫描开球后24小时至8天且仍未验证的 fixture。`last_sporttery_reconcile_attempt_at` 记录所有尝试，只有完整成功才更新 `last_sporttery_reconcile_success_at`。EdgeOne 567、CORS 或清单不完整返回 `partial`，保存原始响应和失败原因，但不生成映射缺失或官方比分。标准 headless Edge 只用于读取官方页面 scope；不得使用代理、stealth、Cookie/Token 重放或验证码处理。
+`run-once` 已接入低频官方补偿：每天最多一次，默认扫描开球后24小时至8天且尚无自动验证证据的 fixture；已有负责人声明的 fixture 仍继续核验。`last_sporttery_reconcile_attempt_at` 记录所有尝试，只有完整成功才更新 `last_sporttery_reconcile_success_at`。EdgeOne 567、CORS 或清单不完整返回 `partial`，保存原始响应和失败原因，但不生成映射缺失或官方比分。标准 headless Edge 只用于读取官方页面 scope；不得使用代理、stealth、Cookie/Token 重放或验证码处理。
 
 证据审计：
 
@@ -204,6 +204,9 @@ $env:FOOTBALL_CUPS_DATA_DIR = 'D:\football-cups-restore-test\data\500'
 ```text
 result_candidate_coverage_24h
 verified_result_coverage
+automatic_verified_result_coverage
+manual_declared_result_coverage
+verified_result_count_by_method
 result_unresolved_count
 result_conflict_count
 result_scope_ambiguous_count
