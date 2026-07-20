@@ -15,6 +15,9 @@ COUNT_TABLES = (
     "snapshot_batches",
     "market_snapshots",
     "bookmaker_market_rows",
+    "market_normalizations",
+    "snapshot_eligibility_assessments",
+    "handicap_index_rows",
     "result_candidates",
     "verified_results",
     "quality_events",
@@ -68,6 +71,19 @@ def database_status(connection: Connection) -> dict[str, Any]:
             "FROM football.strict_fixture_results_by_cutoff GROUP BY target ORDER BY target"
         ).fetchall()
     }
+    model_eligible_by_cutoff: dict[str, int] = {}
+    relation = connection.execute(
+        "SELECT to_regclass('football.current_model_eligible_snapshot_batches') AS name"
+    ).fetchone()
+    if relation and relation["name"] is not None:
+        model_eligible_by_cutoff = {
+            str(row["target"]): int(row["count"])
+            for row in connection.execute(
+                "SELECT target, count(*) AS count "
+                "FROM football.current_model_eligible_snapshot_batches "
+                "GROUP BY target ORDER BY target"
+            ).fetchall()
+        }
     return {
         "migrations": [dict(row) for row in migrations],
         "counts": counts,
@@ -76,6 +92,7 @@ def database_status(connection: Connection) -> dict[str, Any]:
         "unsupported_records": int(unsupported["count"]),
         "current_verified_results": int(current_verified["count"]),
         "strict_fixture_results_by_cutoff": strict_results_by_cutoff,
+        "model_eligible_snapshots_by_cutoff": model_eligible_by_cutoff,
         "latest_import_run": dict(latest_run) if latest_run else None,
     }
 

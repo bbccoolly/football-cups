@@ -1,6 +1,6 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V1.6
+> 版本：V1.7
 > 更新日期：2026-07-17
 
 ## 1. 安装
@@ -94,6 +94,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 .\.venv\Scripts\football-cups-collector.exe backup-oss --workspace .
 .\.venv\Scripts\football-cups-collector.exe health --workspace .
 .\.venv\Scripts\football-cups-collector.exe reconcile-results --workspace . --since <RFC3339> --until <RFC3339>
+.\.venv\Scripts\football-cups-collector.exe audit-market-data --workspace .
 ```
 
 - 每日确认最后心跳、发现轮次、失败、来源缺盘、切点和磁盘。
@@ -104,7 +105,26 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 
 `health` 可能返回 `ok`、`warning` 或 `failed`，退出码分别为 0、1、3。除心跳、发现、时钟、SQLite、磁盘和挂载点外，还报告 `backup_status`、`oss_backup_status`、最近完成时间和 G 盘剩余空间。每日备份超过 26 小时或每周备份超过 8 天为警告，分别超过 48 小时或 15 天为失败。
 
-## 5. 备份
+## 5. 盘口 V2 审计与离线修复
+
+正常采集时欧赔读取 Excel，亚盘、大小球和让球指数直接解析正确解码的 HTML。采集成功只表示来源与切点取得；`SnapshotEligibilityAssessment.model_strict_eligible` 还要求三个核心市场各至少 3 家完整 bookmaker。让球指数不计入 V1 模型资格。
+
+维护前确认未来 15 分钟没有即将关闭的市场窗口，停止采集和数据库任务并完成双层备份。先执行只读审计和 dry-run：
+
+```powershell
+.\.venv\Scripts\football-cups-collector.exe audit-market-data --workspace .
+.\.venv\Scripts\football-cups-collector.exe reparse-markets `
+  --workspace . `
+  --since <RFC3339-inclusive> `
+  --until <RFC3339-exclusive> `
+  --dry-run
+```
+
+确认 `network_requests=0`、乱码和已知盘口转换失败为0后，执行 `--apply`。只有含合法 `complete.json` 且 manifest/JSONL 哈希一致的修复目录才会被数据库导入；重复 `--apply` 和重复导入必须新增0。失败或契约错误的修复批次原样移到 `data/500/quarantine/repairs/`，不得修改内容后冒充完成批次。
+
+V2 正式发布后依次核对 `unsupported_records=0`、current/as-of 只返回整数版本2、每个 `fixture+target` 只有一个当前模型批次，以及非 repairs 的 V1 文件与维护前备份逐文件 SHA-256 相同。修复报告位于 `data/500/reports/repairs/`，不计入实时 7 天或 30 天指标。
+
+## 6. 备份
 
 使用配置脚本验证源和目标的物理磁盘编号，并在不覆盖其他配置的前提下原子更新未跟踪 `.env`：
 
@@ -137,7 +157,7 @@ $env:FOOTBALL_CUPS_DATA_DIR = 'D:\football-cups-restore-test\data\500'
 .\.venv\Scripts\football-cups-collector.exe report-daily --workspace .
 ```
 
-## 6. 故障恢复
+## 7. 故障恢复
 
 - `skipped_locked`：已有实例或备份快照持锁；采集跳过会保存独立 manifest，备份等待超时则返回 1。
 - 退出码 1：存在可重试网络或解析失败，查看日报和日志。
@@ -146,7 +166,7 @@ $env:FOOTBALL_CUPS_DATA_DIR = 'D:\football-cups-restore-test\data\500'
 - SQLite 损坏：保留损坏文件，运行 `rebuild-state`；已错过的历史切点只能标记缺口。
 - 页面结构变化：保留原始响应，停止受影响解析，不手工改写历史数据。
 
-## 7. 全自动赛果闭环
+## 8. 全自动赛果闭环
 
 日期直播页确定性比分自动形成候选；HTML 清单切换后自动读取页面自身的日期 Full 数据流。普通联赛在分析页一致后自动形成已验证赛果。可能加时、未知、身份冲突或比分冲突的比赛自动隔离，不要求人工确认，也不得进入训练。
 

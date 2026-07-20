@@ -24,6 +24,9 @@ SUPPORTED_RECORD_TYPES = frozenset(
         "SnapshotBatch",
         "MarketSnapshot",
         "BookmakerMarketRow",
+        "MarketNormalization",
+        "SnapshotEligibilityAssessment",
+        "HandicapIndexRow",
         "ResultCandidate",
         "VerifiedResult",
         "QualityEvent",
@@ -123,7 +126,14 @@ def nested_decimal(record: dict[str, Any], section: str, key: str) -> Decimal | 
 
 
 def record_event_at(record: dict[str, Any]) -> datetime | None:
-    for key in ("observed_at", "occurred_at", "confirmed_at", "completed_at"):
+    for key in (
+        "observed_at",
+        "occurred_at",
+        "confirmed_at",
+        "completed_at",
+        "normalized_at",
+        "assessed_at",
+    ):
         if record.get(key):
             return parse_time(record[key])
     return None
@@ -332,11 +342,17 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 source_bookmaker_name, row_role, opening, current,
                 opening_home, opening_draw, opening_away, opening_line,
                 opening_over, opening_under, current_home, current_draw,
-                current_away, current_line, current_over, current_under
+                current_away, current_line, current_over, current_under,
+                parser_version, normalization_version, normalized_at,
+                source_snapshot_record_id, normalization_record_id,
+                source_page_sha256, source_workbook_sha256,
+                source_page_observed_at, snapshot_observed_at, source_row_index,
+                line_movement, reprocessed, event_origin
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
             ) ON CONFLICT (record_id) DO NOTHING
             """,
             (
@@ -365,6 +381,138 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 nested_decimal(record, "current", "line"),
                 nested_decimal(record, "current", "over"),
                 nested_decimal(record, "current", "under"),
+                record.get("parser_version"),
+                record.get("normalization_version"),
+                parse_time(record.get("normalized_at")),
+                record.get("source_snapshot_record_id"),
+                record.get("normalization_record_id"),
+                record.get("source_page_sha256"),
+                record.get("source_workbook_sha256"),
+                parse_time(record.get("source_page_observed_at")),
+                parse_time(record.get("snapshot_observed_at")),
+                record.get("source_row_index"),
+                Jsonb(record.get("line_movement")) if record.get("line_movement") else None,
+                bool(record.get("reprocessed")),
+                record.get("event_origin") or "live",
+            ),
+        )
+        return
+
+    if record_type == "MarketNormalization":
+        connection.execute(
+            """
+            INSERT INTO football.market_normalizations (
+                record_id, fixture_id, snapshot_record_id, market, target,
+                normalization_version, parser_version, normalized_at, status,
+                valid_bookmaker_rows, line_parse_failure_count,
+                source_page_sha256, source_workbook_sha256,
+                source_page_observed_at, snapshot_observed_at,
+                quality_reasons, decoding, reprocessed, event_origin
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
+            ) ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                fixture_id,
+                record.get("snapshot_record_id"),
+                record.get("market"),
+                record.get("target"),
+                record.get("normalization_version"),
+                record.get("parser_version"),
+                parse_time(record.get("normalized_at")),
+                record.get("status"),
+                record.get("valid_bookmaker_rows"),
+                record.get("line_parse_failure_count"),
+                record.get("source_page_sha256"),
+                record.get("source_workbook_sha256"),
+                parse_time(record.get("source_page_observed_at")),
+                parse_time(record.get("snapshot_observed_at")),
+                Jsonb(record.get("quality_reasons") or []),
+                Jsonb(record.get("decoding") or {}),
+                bool(record.get("reprocessed")),
+                record.get("event_origin") or "live",
+            ),
+        )
+        return
+
+    if record_type == "SnapshotEligibilityAssessment":
+        connection.execute(
+            """
+            INSERT INTO football.snapshot_eligibility_assessments (
+                record_id, fixture_id, snapshot_batch_record_id, target,
+                assessment_version, assessed_at, collection_eligible,
+                data_complete, model_strict_eligible, market_stats,
+                ineligibility_reasons, event_origin
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            ) ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                fixture_id,
+                record.get("snapshot_batch_record_id"),
+                record.get("target"),
+                record.get("assessment_version"),
+                parse_time(record.get("assessed_at")),
+                bool(record.get("collection_eligible")),
+                bool(record.get("data_complete")),
+                bool(record.get("model_strict_eligible")),
+                Jsonb(record.get("market_stats") or {}),
+                Jsonb(record.get("ineligibility_reasons") or []),
+                record.get("event_origin") or "live",
+            ),
+        )
+        return
+
+    if record_type == "HandicapIndexRow":
+        connection.execute(
+            """
+            INSERT INTO football.handicap_index_rows (
+                record_id, fixture_id, target, observed_at, source_bookmaker_name,
+                handicap_line, home_index, draw_index, away_index,
+                home_probability, draw_probability, away_probability, return_rate,
+                home_kelly, draw_kelly, away_kelly, raw_cells, parser_version,
+                normalization_version, normalized_at, source_snapshot_record_id,
+                normalization_record_id, source_page_sha256,
+                source_page_observed_at, snapshot_observed_at, source_row_index,
+                reprocessed, event_origin
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
+            ) ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                fixture_id,
+                record.get("target"),
+                parse_time(record.get("observed_at")),
+                record.get("source_bookmaker_name"),
+                parse_decimal(record.get("handicap_line")),
+                parse_decimal(record.get("home_index")),
+                parse_decimal(record.get("draw_index")),
+                parse_decimal(record.get("away_index")),
+                parse_decimal(record.get("home_probability")),
+                parse_decimal(record.get("draw_probability")),
+                parse_decimal(record.get("away_probability")),
+                parse_decimal(record.get("return_rate")),
+                parse_decimal(record.get("home_kelly")),
+                parse_decimal(record.get("draw_kelly")),
+                parse_decimal(record.get("away_kelly")),
+                Jsonb(record.get("raw_cells") or []),
+                record.get("parser_version"),
+                record.get("normalization_version"),
+                parse_time(record.get("normalized_at")),
+                record.get("source_snapshot_record_id"),
+                record.get("normalization_record_id"),
+                record.get("source_page_sha256"),
+                parse_time(record.get("source_page_observed_at")),
+                parse_time(record.get("snapshot_observed_at")),
+                record.get("source_row_index"),
+                bool(record.get("reprocessed")),
+                record.get("event_origin") or "live",
             ),
         )
         return
@@ -578,6 +726,49 @@ def import_manifests(connection: Connection, data_dir: Path) -> ManifestImportSu
     return summary
 
 
+def _jsonl_sort_key(path: Path, normalized_dir: Path) -> tuple[str, int, str]:
+    relative = path.relative_to(normalized_dir).as_posix()
+    priority = {
+        "market_snapshots.jsonl": 0,
+        "snapshot_batches.jsonl": 0,
+        "market_normalizations.jsonl": 1,
+        "bookmaker_market_rows.jsonl": 2,
+        "handicap_index_rows.jsonl": 2,
+        "snapshot_eligibility_assessments.jsonl": 3,
+    }.get(path.name, 1)
+    return (path.parent.relative_to(normalized_dir).as_posix(), priority, relative)
+
+
+def _validate_repair_run(run_dir: Path) -> None:
+    manifest_path = run_dir / "manifest.json"
+    complete_path = run_dir / "complete.json"
+    if not manifest_path.is_file() or not complete_path.is_file():
+        raise ImportContractError(f"{run_dir}: repair run is missing completion evidence")
+    manifest_raw = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(manifest_raw.decode("utf-8"))
+        complete = json.loads(complete_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ImportContractError(f"{run_dir}: repair metadata is invalid") from exc
+    manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+    if complete.get("status") != "completed" or complete.get("manifest_sha256") != manifest_sha:
+        raise AppendOnlyViolation(f"{run_dir}: repair completion marker is invalid")
+    expected_files = manifest.get("files")
+    if not isinstance(expected_files, list):
+        raise ImportContractError(f"{run_dir}: repair manifest has no file inventory")
+    for item in expected_files:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ImportContractError(f"{run_dir}: invalid repair file inventory")
+        path = run_dir / item["name"]
+        if not path.is_file():
+            raise AppendOnlyViolation(f"{run_dir}: repair file is missing: {item['name']}")
+        raw = path.read_bytes()
+        if len(raw) != item.get("size_bytes") or hashlib.sha256(raw).hexdigest() != item.get(
+            "sha256"
+        ):
+            raise AppendOnlyViolation(f"{run_dir}: repair file hash mismatch: {item['name']}")
+
+
 def import_jsonl_tree(connection: Connection, normalized_dir: Path) -> ImportSummary:
     run_id = uuid4().hex
     summary = ImportSummary(run_id=run_id)
@@ -589,8 +780,22 @@ def import_jsonl_tree(connection: Connection, normalized_dir: Path) -> ImportSum
     connection.commit()
 
     try:
-        files = sorted(normalized_dir.rglob("*.jsonl")) if normalized_dir.is_dir() else []
+        files = (
+            sorted(normalized_dir.rglob("*.jsonl"), key=lambda path: _jsonl_sort_key(path, normalized_dir))
+            if normalized_dir.is_dir()
+            else []
+        )
+        validated_repairs: set[Path] = set()
         for path in files:
+            try:
+                repair_relative = path.relative_to(normalized_dir / "repairs")
+            except ValueError:
+                repair_relative = None
+            if repair_relative is not None:
+                run_dir = normalized_dir / "repairs" / repair_relative.parts[0]
+                if run_dir not in validated_repairs:
+                    _validate_repair_run(run_dir)
+                    validated_repairs.add(run_dir)
             relative = path.relative_to(normalized_dir.parent).as_posix()
             stat = path.stat()
             checkpoint = connection.execute(

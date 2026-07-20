@@ -21,6 +21,7 @@ from .backup import (
 )
 from .config import CollectorConfig
 from .reporting import write_daily_report, write_window_report
+from .reparse import audit_market_data, collect_market_reparse, publish_market_reparse
 from .service import CollectorService, rebuild_state
 from .state import StateStore
 from .storage import DataStore, SingleInstanceLock, json_dumps, make_run_id
@@ -64,6 +65,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "health",
         "smoke-live",
         "reconcile-results",
+        "audit-market-data",
+        "reparse-markets",
     ):
         subparser = subparsers.add_parser(name)
         add_workspace_argument(subparser)
@@ -82,6 +85,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if name == "reconcile-results":
             subparser.add_argument("--since", required=True, help="RFC3339 inclusive kickoff start")
             subparser.add_argument("--until", required=True, help="RFC3339 exclusive kickoff end")
+        if name == "reparse-markets":
+            subparser.add_argument("--since", required=True, help="RFC3339 inclusive capture start")
+            subparser.add_argument("--until", required=True, help="RFC3339 exclusive capture end")
+            mode = subparser.add_mutually_exclusive_group(required=True)
+            mode.add_argument("--dry-run", action="store_true")
+            mode.add_argument("--apply", action="store_true")
     verify = subparsers.add_parser("verify-results")
     add_workspace_argument(verify)
     verify.add_argument("--input", type=Path, required=True)
@@ -402,6 +411,34 @@ def main(argv: list[str] | None = None) -> int:
                 _record_locked_skip(config, args.command)
             print(json_dumps({"status": "skipped_locked"}, indent=2))
             return 0
+        if args.command == "audit-market-data":
+            try:
+                result = audit_market_data(config)
+            except ValueError as exc:
+                print(json_dumps({"status": "invalid", "error": str(exc)}, indent=2))
+                return 2
+            except OSError as exc:
+                print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
+                return 3
+            print(json_dumps(result, indent=2))
+            return 0 if result.get("status") == "audited" else 1
+        if args.command == "reparse-markets":
+            try:
+                start = parse_iso(args.since)
+                end = parse_iso(args.until)
+                if args.apply:
+                    result = publish_market_reparse(config, start=start, end=end)
+                else:
+                    _, result, _ = collect_market_reparse(config, start=start, end=end)
+                    result = result | {"status": "dry_run"}
+            except ValueError as exc:
+                print(json_dumps({"status": "invalid", "error": str(exc)}, indent=2))
+                return 2
+            except OSError as exc:
+                print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
+                return 3
+            print(json_dumps(result, indent=2))
+            return 1 if result.get("counts", {}).get("capture_failures") else 0
         with CollectorService(config) as service:
             if args.command == "discover":
                 result = service.discover()

@@ -4,6 +4,7 @@ import copy
 import io
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -23,6 +24,15 @@ from .timeutil import iso_utc, parse_iso
 ODDS_BASE_URL = "https://odds.500.com"
 MIN_VALID_EXCEL_BYTES = 2048
 BLOCKED_MARKERS = ("请选择正确数据", "验证码", "登录/注册", "passport.500.com", "用户登录")
+PARSER_VERSION = "500-market-v2"
+NORMALIZATION_VERSION = 2
+MIN_COMPLETE_BOOKMAKERS = 3
+SUMMARY_BOOKMAKERS = frozenset({"最高值", "最低值", "平均值", "离散值"})
+MOJIBAKE_MARKERS = ("脳卯", "脝陆", "脢脰", "赂脽", "碌脥", "脕垄", "脧茫")
+META_CHARSET_PATTERN = re.compile(
+    br"<meta[^>]+charset\s*=\s*['\"]?\s*([a-zA-Z0-9._-]+)", re.IGNORECASE
+)
+CONTENT_TYPE_CHARSET_PATTERN = re.compile(r"charset\s*=\s*([a-zA-Z0-9._-]+)", re.IGNORECASE)
 
 
 class MarketCollectionError(RuntimeError):
@@ -48,6 +58,7 @@ class MarketCapture:
     raw_blobs: list[dict[str, Any]]
     snapshot: dict[str, Any] | None
     rows: list[dict[str, Any]]
+    normalization: dict[str, Any] | None = None
     error_type: str | None = None
     error: str | None = None
 
@@ -56,15 +67,78 @@ def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def decode_page(response: ObservedResponse) -> str:
-    for encoding in (response.source_encoding, "utf-8", "gb18030", "gb2312"):
-        if not encoding or encoding == "unknown":
+def _canonical_encoding(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().strip("'\"").lower().replace("_", "-")
+    aliases = {
+        "gb2312": "gb18030",
+        "gbk": "gb18030",
+        "gb-2312": "gb18030",
+        "utf8": "utf-8",
+        "latin-1": "iso-8859-1",
+        "latin1": "iso-8859-1",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _declared_encoding(content: bytes) -> str | None:
+    match = META_CHARSET_PATTERN.search(content[:8192])
+    if not match:
+        return None
+    return _canonical_encoding(match.group(1).decode("ascii", errors="ignore"))
+
+
+def _header_encoding(response: ObservedResponse) -> str | None:
+    match = CONTENT_TYPE_CHARSET_PATTERN.search(response.headers.get("content-type", ""))
+    return _canonical_encoding(match.group(1)) if match else None
+
+
+def _validate_decoded_market_page(text: str) -> None:
+    if "\ufffd" in text:
+        raise MarketCollectionError("decoded market page contains replacement characters")
+    if any(marker in text for marker in MOJIBAKE_MARKERS):
+        raise MarketCollectionError("decoded market page contains known mojibake markers")
+    if "xls" not in text or "row" not in text:
+        raise MarketCollectionError("decoded market page has no export table structure")
+
+
+def decode_page_with_evidence(response: ObservedResponse) -> tuple[str, dict[str, str | None]]:
+    declared = _declared_encoding(response.content)
+    header = _header_encoding(response)
+    inferred = _canonical_encoding(response.source_encoding)
+    candidates: list[tuple[str, str]] = []
+    for source, encoding in (
+        ("meta", declared),
+        ("content_type", header),
+        ("gb18030_fallback", "gb18030"),
+        ("utf8_fallback", "utf-8"),
+        ("requests_inference", inferred),
+    ):
+        if not encoding or any(existing == encoding for _, existing in candidates):
             continue
+        if encoding == "iso-8859-1":
+            continue
+        candidates.append((source, encoding))
+    errors: list[str] = []
+    for source, encoding in candidates:
         try:
-            return response.content.decode(encoding)
-        except (LookupError, UnicodeDecodeError):
-            continue
-    return response.content.decode("utf-8", errors="replace")
+            text = response.content.decode(encoding)
+            _validate_decoded_market_page(text)
+            return text, {
+                "declared_encoding": declared,
+                "header_encoding": header,
+                "inferred_encoding": inferred,
+                "selected_encoding": encoding,
+                "encoding_source": source,
+            }
+        except (LookupError, UnicodeDecodeError, MarketCollectionError) as exc:
+            errors.append(f"{source}:{encoding}:{exc}")
+    raise MarketCollectionError("cannot safely decode market page: " + "; ".join(errors))
+
+
+def decode_page(response: ObservedResponse) -> str:
+    return decode_page_with_evidence(response)[0]
 
 
 def content_looks_blocked(content: bytes) -> str | None:
@@ -218,6 +292,91 @@ def _value(value: Any) -> dict[str, str | None]:
     return {"raw": _raw_cell(value), "decimal": _decimal(value)}
 
 
+HANDICAP_BASE_VALUES: dict[str, Decimal] = {
+    "平手": Decimal("0"),
+    "半球": Decimal("0.5"),
+    "一球": Decimal("1"),
+    "球半": Decimal("1.5"),
+    "两球": Decimal("2"),
+    "两球半": Decimal("2.5"),
+    "三球": Decimal("3"),
+    "三球半": Decimal("3.5"),
+    "四球": Decimal("4"),
+    "四球半": Decimal("4.5"),
+    "五球": Decimal("5"),
+}
+
+
+def normalize_company_name(value: Any) -> str | None:
+    raw = _raw_cell(value)
+    if raw is None:
+        return None
+    return normalize_space(unicodedata.normalize("NFKC", raw)) or None
+
+
+def market_row_role(name: str | None) -> str:
+    if not name:
+        return "unknown"
+    if name in SUMMARY_BOOKMAKERS:
+        return "summary"
+    if name == "竞彩官方":
+        return "official"
+    return "bookmaker"
+
+
+def normalize_handicap_line(value: Any) -> tuple[dict[str, str | None], str, str | None]:
+    raw = _raw_cell(value)
+    result: dict[str, str | None] = {"raw": raw, "decimal": None}
+    if not raw:
+        return result, "none", "missing"
+    text = normalize_space(unicodedata.normalize("NFKC", raw))
+    movement = "none"
+    movement_match = re.search(r"(?:\s*)(升|降)$", text)
+    if movement_match:
+        movement = "up" if movement_match.group(1) == "升" else "down"
+        text = text[: movement_match.start()].strip()
+    receiving = text.startswith("受")
+    if receiving:
+        text = text[1:]
+    try:
+        numeric = Decimal(text)
+    except InvalidOperation:
+        numeric = None
+    if numeric is not None:
+        if numeric < -10 or numeric > 10:
+            return result, movement, "handicap_line_out_of_range"
+        result["decimal"] = format(numeric, "f")
+        return result, movement, None
+    parts = [part.strip() for part in text.split("/")]
+    if not parts or any(part not in HANDICAP_BASE_VALUES for part in parts):
+        return result, movement, "unknown_handicap_line"
+    magnitude = sum((HANDICAP_BASE_VALUES[part] for part in parts), Decimal("0")) / len(parts)
+    normalized = magnitude if receiving else -magnitude
+    result["decimal"] = format(normalized, "f")
+    return result, movement, None
+
+
+def normalize_total_line(value: Any) -> tuple[dict[str, str | None], str | None]:
+    raw = _raw_cell(value)
+    result: dict[str, str | None] = {"raw": raw, "decimal": None}
+    if not raw:
+        return result, "missing"
+    text = normalize_space(unicodedata.normalize("NFKC", raw))
+    try:
+        parts = [Decimal(part.strip()) for part in text.split("/")]
+    except InvalidOperation:
+        return result, "unknown_total_line"
+    if len(parts) not in {1, 2}:
+        return result, "unknown_total_line"
+    if len(parts) == 2 and abs(parts[0] - parts[1]) != Decimal("0.5"):
+        return result, "invalid_total_split"
+    normalized = sum(parts, Decimal("0")) / len(parts)
+    if normalized < 0 or normalized > 20:
+        return result, "total_line_out_of_range"
+    result["decimal"] = format(normalized, "f")
+    return result, None
+
+
 def _source_time(raw: Any, kickoff_at: str | None, timezone_name: str) -> dict[str, str | None]:
     text = _raw_cell(raw)
     result: dict[str, str | None] = {
@@ -238,6 +397,97 @@ def _source_time(raw: Any, kickoff_at: str | None, timezone_name: str) -> dict[s
     result["parsed"] = iso_utc(candidate)
     result["inference"] = "year_inferred_from_kickoff"
     return result
+
+
+def _complete_bookmaker_row(market: str, row: dict[str, Any]) -> bool:
+    if row.get("row_role") != "bookmaker":
+        return False
+    opening = row.get("opening") or {}
+    current = row.get("current") or {}
+    keys = {
+        "ouzhi": ("home", "draw", "away"),
+        "yazhi": ("home", "line", "away"),
+        "daxiao": ("over", "line", "under"),
+    }.get(market, ())
+    return bool(keys) and all(
+        isinstance(container.get(key), dict) and container[key].get("decimal") is not None
+        for container in (opening, current)
+        for key in keys
+    )
+
+
+def _build_normalization(
+    *,
+    snapshot_record_id: str,
+    fixture_id: str,
+    market: str,
+    target: str,
+    normalized_at: datetime,
+    source_page_sha256: str | None,
+    source_workbook_sha256: str | None,
+    source_page_observed_at: datetime | None,
+    snapshot_observed_at: datetime,
+    rows: list[dict[str, Any]],
+    reprocessed: bool,
+    decoding: dict[str, str | None] | None = None,
+) -> dict[str, Any]:
+    if source_page_observed_at and source_page_observed_at > snapshot_observed_at:
+        raise MarketCollectionError("source page observation is later than market snapshot")
+    valid_names = {
+        str(row["source_bookmaker_name"])
+        for row in rows
+        if _complete_bookmaker_row(market, row) and row.get("source_bookmaker_name")
+    }
+    bookmaker_rows = [row for row in rows if row.get("row_role") == "bookmaker"]
+    source_time_rows = sum(
+        1 for row in bookmaker_rows if (row.get("source_event_time") or {}).get("parsed")
+    )
+    line_failures = sum(
+        1
+        for row in rows
+        if row.get("row_role") == "bookmaker"
+        and market in {"yazhi", "daxiao"}
+        and any(
+            (row.get(section) or {}).get("line", {}).get("decimal") is None
+            for section in ("opening", "current")
+        )
+    )
+    source_hash = source_page_sha256 or source_workbook_sha256 or "none"
+    record_id = stable_record_id(
+        "market_normalization", snapshot_record_id, NORMALIZATION_VERSION, source_hash
+    )
+    reasons: list[str] = []
+    if not rows:
+        reasons.append("no_rows")
+    if len(valid_names) < MIN_COMPLETE_BOOKMAKERS and market in {"ouzhi", "yazhi", "daxiao"}:
+        reasons.append("insufficient_complete_bookmakers")
+    if line_failures:
+        reasons.append("line_parse_failures")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "record_type": "MarketNormalization",
+        "record_id": record_id,
+        "fixture_id": fixture_id,
+        "snapshot_record_id": snapshot_record_id,
+        "market": market,
+        "target": target,
+        "normalization_version": NORMALIZATION_VERSION,
+        "parser_version": PARSER_VERSION,
+        "normalized_at": iso_utc(normalized_at),
+        "status": "accepted" if rows else "rejected",
+        "valid_bookmaker_rows": len(valid_names),
+        "bookmaker_rows": len(bookmaker_rows),
+        "source_event_time_rows": source_time_rows,
+        "line_parse_failure_count": line_failures,
+        "source_page_sha256": source_page_sha256,
+        "source_workbook_sha256": source_workbook_sha256,
+        "source_page_observed_at": iso_utc(source_page_observed_at) if source_page_observed_at else None,
+        "snapshot_observed_at": iso_utc(snapshot_observed_at),
+        "quality_reasons": reasons,
+        "decoding": decoding or {},
+        "reprocessed": reprocessed,
+        "event_origin": "reprocess" if reprocessed else "live",
+    }
 
 
 def parse_market_workbook(
@@ -385,6 +635,306 @@ def parse_market_workbook(
     return snapshot, rows
 
 
+def _upgrade_bookmaker_rows_v2(
+    rows: list[dict[str, Any]],
+    *,
+    snapshot_record_id: str,
+    market: str,
+    source_hash: str,
+    normalized_at: datetime,
+    source_page_sha256: str | None,
+    source_workbook_sha256: str | None,
+    source_page_observed_at: datetime | None,
+    snapshot_observed_at: datetime,
+    reprocessed: bool,
+) -> list[dict[str, Any]]:
+    upgraded: list[dict[str, Any]] = []
+    for index, source in enumerate(rows):
+        row = copy.deepcopy(source)
+        name = normalize_company_name(row.get("source_bookmaker_name"))
+        row["record_id"] = stable_record_id(
+            "bookmaker_row_v2", snapshot_record_id, NORMALIZATION_VERSION, index, source_hash
+        )
+        row["source_bookmaker_name"] = name
+        row["row_role"] = market_row_role(name)
+        row["parser_version"] = PARSER_VERSION
+        row["normalization_version"] = NORMALIZATION_VERSION
+        row["normalized_at"] = iso_utc(normalized_at)
+        row["source_snapshot_record_id"] = snapshot_record_id
+        row["source_page_sha256"] = source_page_sha256
+        row["source_workbook_sha256"] = source_workbook_sha256
+        row["source_page_observed_at"] = (
+            iso_utc(source_page_observed_at) if source_page_observed_at else None
+        )
+        row["snapshot_observed_at"] = iso_utc(snapshot_observed_at)
+        row["source_row_index"] = index
+        row["reprocessed"] = reprocessed
+        row["event_origin"] = "reprocess" if reprocessed else "live"
+        movements: dict[str, str] = {}
+        if market == "yazhi":
+            for section in ("opening", "current"):
+                value, movement, _ = normalize_handicap_line((row.get(section) or {}).get("line", {}).get("raw"))
+                row[section]["line"] = value
+                movements[section] = movement
+        elif market == "daxiao":
+            for section in ("opening", "current"):
+                value, _ = normalize_total_line((row.get(section) or {}).get("line", {}).get("raw"))
+                row[section]["line"] = value
+        row["line_movement"] = movements or None
+        upgraded.append(row)
+    return upgraded
+
+
+def parse_market_workbook_v2(
+    content: bytes,
+    *,
+    fixture_id: str,
+    market: str,
+    target: str,
+    observed_at: datetime,
+    kickoff_at: str | None,
+    timezone_name: str,
+    raw_sha256: str,
+    normalized_at: datetime | None = None,
+    source_snapshot_record_id: str | None = None,
+    source_page_sha256: str | None = None,
+    source_page_observed_at: datetime | None = None,
+    reprocessed: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    snapshot, legacy_rows = parse_market_workbook(
+        content,
+        fixture_id=fixture_id,
+        market=market,
+        target=target,
+        observed_at=observed_at,
+        kickoff_at=kickoff_at,
+        timezone_name=timezone_name,
+        raw_sha256=raw_sha256,
+    )
+    snapshot_record_id = source_snapshot_record_id or str(snapshot["record_id"])
+    if source_snapshot_record_id:
+        snapshot["record_id"] = source_snapshot_record_id
+    normalized = normalized_at or observed_at
+    rows = _upgrade_bookmaker_rows_v2(
+        legacy_rows,
+        snapshot_record_id=snapshot_record_id,
+        market=market,
+        source_hash=source_page_sha256 or raw_sha256,
+        normalized_at=normalized,
+        source_page_sha256=source_page_sha256,
+        source_workbook_sha256=raw_sha256,
+        source_page_observed_at=source_page_observed_at,
+        snapshot_observed_at=observed_at,
+        reprocessed=reprocessed,
+    )
+    normalization = _build_normalization(
+        snapshot_record_id=snapshot_record_id,
+        fixture_id=fixture_id,
+        market=market,
+        target=target,
+        normalized_at=normalized,
+        source_page_sha256=source_page_sha256,
+        source_workbook_sha256=raw_sha256,
+        source_page_observed_at=source_page_observed_at,
+        snapshot_observed_at=observed_at,
+        rows=rows,
+        reprocessed=reprocessed,
+    )
+    for row in rows:
+        row["normalization_record_id"] = normalization["record_id"]
+    snapshot["parser_version"] = PARSER_VERSION
+    snapshot["normalization_record_id"] = normalization["record_id"]
+    return snapshot, rows, normalization
+
+
+def _split_export_rows(body: dict[str, str], *, include_footer: bool = False) -> list[list[str | None]]:
+    sections = [body.get("row", "")]
+    if include_footer:
+        sections.append(body.get("footer", ""))
+    combined = "$".join(section for section in sections if section)
+    return [
+        [cell.strip() or None for cell in row.split("|")]
+        for row in combined.split("$")
+        if row
+    ]
+
+
+def _percent_decimal(value: Any) -> str | None:
+    raw = _raw_cell(value)
+    if not raw:
+        return None
+    return _decimal(raw.removesuffix("%"))
+
+
+def parse_market_html_v2(
+    response: ObservedResponse,
+    *,
+    fixture_id: str,
+    market: str,
+    target: str,
+    kickoff_at: str | None,
+    timezone_name: str,
+    raw_sha256: str,
+    normalized_at: datetime | None = None,
+    source_snapshot_record_id: str | None = None,
+    snapshot_observed_at: datetime | None = None,
+    reprocessed: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    page, decoding = decode_page_with_evidence(response)
+    body = collect_download_table_data(page, market)
+    matrix = _split_export_rows(body, include_footer=market in {"yazhi", "daxiao"})
+    observed = snapshot_observed_at or response.response_received_at
+    if response.response_received_at > observed:
+        raise MarketCollectionError("source page observation is later than market snapshot")
+    snapshot_record_id = source_snapshot_record_id or stable_record_id(
+        "market_snapshot", fixture_id, market, target, iso_utc(observed), raw_sha256
+    )
+    normalized = normalized_at or observed
+    rows: list[dict[str, Any]] = []
+    if market in {"yazhi", "daxiao"}:
+        labels = ("home", "line", "away") if market == "yazhi" else ("over", "line", "under")
+        for index, cells in enumerate(matrix):
+            if len(cells) < 9 or _decimal(cells[1]) is None or _decimal(cells[3]) is None:
+                continue
+            name = normalize_company_name(cells[0])
+            current: dict[str, dict[str, str | None]] = {
+                labels[0]: _value(cells[1]),
+                labels[2]: _value(cells[3]),
+            }
+            opening: dict[str, dict[str, str | None]] = {
+                labels[0]: _value(cells[5]),
+                labels[2]: _value(cells[7]),
+            }
+            movements: dict[str, str] | None = None
+            if market == "yazhi":
+                current_line, current_movement, _ = normalize_handicap_line(cells[2])
+                opening_line, opening_movement, _ = normalize_handicap_line(cells[6])
+                movements = {"current": current_movement, "opening": opening_movement}
+            else:
+                current_line, _ = normalize_total_line(cells[2])
+                opening_line, _ = normalize_total_line(cells[6])
+            current["line"] = current_line
+            opening["line"] = opening_line
+            rows.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "record_type": "BookmakerMarketRow",
+                    "record_id": stable_record_id(
+                        "bookmaker_row_v2", snapshot_record_id, NORMALIZATION_VERSION, index, raw_sha256
+                    ),
+                    "fixture_id": fixture_id,
+                    "market": market,
+                    "target": target,
+                    "observed_at": iso_utc(observed),
+                    "source_bookmaker_name": name,
+                    "source_bookmaker_id": None,
+                    "row_role": market_row_role(name),
+                    "current": current,
+                    "opening": opening,
+                    "source_event_time": _source_time(cells[4], kickoff_at, timezone_name),
+                    "opening_source_event_time": _source_time(cells[8], kickoff_at, timezone_name),
+                    "corrected_at": None,
+                    "raw_cells": cells,
+                    "parser_version": PARSER_VERSION,
+                    "normalization_version": NORMALIZATION_VERSION,
+                    "normalized_at": iso_utc(normalized),
+                    "source_snapshot_record_id": snapshot_record_id,
+                    "source_page_sha256": raw_sha256,
+                    "source_workbook_sha256": None,
+                    "source_page_observed_at": iso_utc(response.response_received_at),
+                    "snapshot_observed_at": iso_utc(observed),
+                    "source_row_index": index,
+                    "line_movement": movements,
+                    "reprocessed": reprocessed,
+                    "event_origin": "reprocess" if reprocessed else "live",
+                }
+            )
+    elif market == "rangqiu":
+        for index, cells in enumerate(matrix):
+            if len(cells) < 12 or _decimal(cells[2]) is None:
+                continue
+            name = normalize_company_name(cells[0])
+            rows.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "record_type": "HandicapIndexRow",
+                    "record_id": stable_record_id(
+                        "handicap_index_row_v2", snapshot_record_id, NORMALIZATION_VERSION, index, raw_sha256
+                    ),
+                    "fixture_id": fixture_id,
+                    "market": market,
+                    "target": target,
+                    "observed_at": iso_utc(observed),
+                    "source_bookmaker_name": name,
+                    "handicap_line": _decimal(cells[1]),
+                    "home_index": _decimal(cells[2]),
+                    "draw_index": _decimal(cells[3]),
+                    "away_index": _decimal(cells[4]),
+                    "home_probability": _percent_decimal(cells[5]),
+                    "draw_probability": _percent_decimal(cells[6]),
+                    "away_probability": _percent_decimal(cells[7]),
+                    "return_rate": _percent_decimal(cells[8]),
+                    "home_kelly": _decimal(cells[9]),
+                    "draw_kelly": _decimal(cells[10]),
+                    "away_kelly": _decimal(cells[11]),
+                    "raw_cells": cells,
+                    "parser_version": PARSER_VERSION,
+                    "normalization_version": NORMALIZATION_VERSION,
+                    "normalized_at": iso_utc(normalized),
+                    "source_snapshot_record_id": snapshot_record_id,
+                    "source_page_sha256": raw_sha256,
+                    "source_page_observed_at": iso_utc(response.response_received_at),
+                    "snapshot_observed_at": iso_utc(observed),
+                    "source_row_index": index,
+                    "reprocessed": reprocessed,
+                    "event_origin": "reprocess" if reprocessed else "live",
+                }
+            )
+    else:
+        raise ValueError(f"HTML market parser does not support {market}")
+    normalization = _build_normalization(
+        snapshot_record_id=snapshot_record_id,
+        fixture_id=fixture_id,
+        market=market,
+        target=target,
+        normalized_at=normalized,
+        source_page_sha256=raw_sha256,
+        source_workbook_sha256=None,
+        source_page_observed_at=response.response_received_at,
+        snapshot_observed_at=observed,
+        rows=rows,
+        reprocessed=reprocessed,
+        decoding=decoding,
+    )
+    for row in rows:
+        row["normalization_record_id"] = normalization["record_id"]
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "record_type": "MarketSnapshot",
+        "record_id": snapshot_record_id,
+        "fixture_id": fixture_id,
+        "market": market,
+        "target": target,
+        "observed_at": iso_utc(observed),
+        "ingested_at": None,
+        "source_event_time": None,
+        "corrected_at": None,
+        "source_url": response.url,
+        "raw_sha256": raw_sha256,
+        "row_count": len(rows),
+        "bookmaker_count": len(
+            {row.get("source_bookmaker_name") for row in rows if row.get("row_role") == "bookmaker"}
+        ),
+        "parser_version": PARSER_VERSION,
+        "parse_status": "success",
+        "source_market_available": True,
+        "raw_matrix": matrix,
+        "decoding": decoding,
+        "normalization_record_id": normalization["record_id"],
+    }
+    return snapshot, rows, normalization
+
+
 class MarketCollector:
     def __init__(
         self,
@@ -419,52 +969,60 @@ class MarketCollector:
                 if not response.ok:
                     raise MarketCollectionError(f"HTTP {response.status_code}")
                 workbook_response = response
+                raw_sha = raw_blobs[-1]["sha256"]
+                snapshot, rows, normalization = parse_market_workbook_v2(
+                    workbook_response.content,
+                    fixture_id=fixture_id,
+                    market=market,
+                    target=target,
+                    observed_at=workbook_response.response_received_at,
+                    kickoff_at=fixture.get("kickoff_at"),
+                    timezone_name=self.config.timezone_name,
+                    raw_sha256=raw_sha,
+                )
             else:
                 page_url = f"{ODDS_BASE_URL}/fenxi/{market}-{fixture_id}.shtml"
                 page_response = self.http.request("GET", page_url)
                 raw_blobs.append(self.data.store_response(page_response, default_extension="html"))
                 if not page_response.ok:
                     raise MarketCollectionError(f"HTTP {page_response.status_code}")
-                page = decode_page(page_response)
-                table_data = collect_download_table_data(page, market)
-                try:
-                    action, fields = parse_export_form(page)
-                except SourceMarketUnavailable:
-                    if market != "rangqiu":
-                        raise
-                    action = f"{ODDS_BASE_URL}/fenxi1/rangqiu_xls.php"
-                    fields = {
-                        "name": f"{fixture.get('home_team_name', '')}VS{fixture.get('away_team_name', '')}"
-                    }
-                fields.update(table_data)
-                workbook_response = self.http.request(
-                    "POST", action, headers={"Referer": page_url}, data=fields
+                raw_sha = raw_blobs[-1]["sha256"]
+                snapshot, rows, normalization = parse_market_html_v2(
+                    page_response,
+                    fixture_id=fixture_id,
+                    market=market,
+                    target=target,
+                    kickoff_at=fixture.get("kickoff_at"),
+                    timezone_name=self.config.timezone_name,
+                    raw_sha256=raw_sha,
                 )
-                raw_blobs.append(self.data.store_response(workbook_response, default_extension="xls"))
-                if not workbook_response.ok:
-                    raise MarketCollectionError(f"HTTP {workbook_response.status_code}")
-
-            raw_sha = raw_blobs[-1]["sha256"]
-            snapshot, rows = parse_market_workbook(
-                workbook_response.content,
-                fixture_id=fixture_id,
+            return MarketCapture(
                 market=market,
-                target=target,
-                observed_at=workbook_response.response_received_at,
-                kickoff_at=fixture.get("kickoff_at"),
-                timezone_name=self.config.timezone_name,
-                raw_sha256=raw_sha,
+                status="success",
+                raw_blobs=raw_blobs,
+                snapshot=snapshot,
+                rows=rows,
+                normalization=normalization,
             )
-            return MarketCapture(market, "success", raw_blobs, snapshot, rows)
         except MarketCollectionError as exc:
-            return MarketCapture(market, "failed", raw_blobs, None, [], exc.error_type, str(exc))
+            return MarketCapture(
+                market=market,
+                status="failed",
+                raw_blobs=raw_blobs,
+                snapshot=None,
+                rows=[],
+                normalization=None,
+                error_type=exc.error_type,
+                error=str(exc),
+            )
         except Exception as exc:  # noqa: BLE001 - one market must not abort the fixture batch.
             return MarketCapture(
-                market,
-                "failed",
-                raw_blobs,
-                None,
-                [],
-                "parser_failure",
-                f"{type(exc).__name__}: {exc}",
+                market=market,
+                status="failed",
+                raw_blobs=raw_blobs,
+                snapshot=None,
+                rows=[],
+                normalization=None,
+                error_type="parser_failure",
+                error=f"{type(exc).__name__}: {exc}",
             )

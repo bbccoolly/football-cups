@@ -8,6 +8,8 @@
 
 项目处于“阶段 3：标准化数据库”。项目负责人已授权在采集验证继续运行的同时提前建设 PostgreSQL 可重建分析层；这不代表 24 小时、7 天或 30 天采集验收已经通过。当前仍不开发模型或 Web 产品，也不将验证采集器标记为长期生产可用。
 
+盘口标准化 V2 已上线：亚盘、大小球和让球指数改为正确解码后的 HTML 直解析，历史 V1 保留并通过离线重放追加 V2 证据。采集成功与模型字段完整性已经分层；每个核心市场至少需要 3 家完整 bookmaker。V2 的 7 天和 30 天子窗口正在重新累计。
+
 当前进度及唯一下一步见 `docs/project-status.md`。隔离的公开历史研究基线已经可运行，但不属于正式阶段 4。阿里云杭州 ECS 已创建，但目前只允许隔离 smoke；数据盘、OSS 和正式切换门禁尚未完成。
 
 ## 文档入口
@@ -37,6 +39,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\football-cups-collector.exe discover --workspace .
 .\.venv\Scripts\football-cups-collector.exe run-once --workspace .
 .\.venv\Scripts\football-cups-collector.exe health --workspace .
+.\.venv\Scripts\football-cups-collector.exe audit-market-data --workspace .
 ```
 
 当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。本地默认运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。

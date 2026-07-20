@@ -143,6 +143,202 @@ def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[s
     }
 
 
+def _market_v2_metrics(
+    events: list[dict[str, Any]], timezone_name: str
+) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    grouped: dict[tuple[str, str, str, str], Counter[str]] = defaultdict(Counter)
+    for event in events:
+        if event["event_type"] != "market_capture" or event["status"] != "success":
+            continue
+        details = event.get("details") or {}
+        if details.get("parser_version") != "500-market-v2":
+            continue
+        local_date = parse_iso(str(event["occurred_at"])).astimezone(zone).date().isoformat()
+        key = (
+            local_date,
+            str(event.get("competition") or "unknown"),
+            str(event.get("market") or "unknown"),
+            str(event.get("cutoff") or "unknown"),
+        )
+        aggregate = grouped[key]
+        aggregate["snapshots"] += 1
+        aggregate["valid_bookmaker_rows"] += int(details.get("valid_bookmaker_rows") or 0)
+        aggregate["bookmaker_rows"] += int(details.get("bookmaker_rows") or 0)
+        aggregate["line_parse_failure_count"] += int(
+            details.get("line_parse_failure_count") or 0
+        )
+        aggregate["source_event_time_rows"] += int(
+            details.get("source_event_time_rows") or 0
+        )
+
+    by_market: dict[str, Counter[str]] = defaultdict(Counter)
+    breakdown: list[dict[str, Any]] = []
+    for (local_date, competition, market, cutoff), aggregate in sorted(grouped.items()):
+        by_market[market].update(aggregate)
+        bookmaker_rows = aggregate["bookmaker_rows"]
+        line_denominator = bookmaker_rows if market in {"yazhi", "daxiao"} else 0
+        breakdown.append(
+            {
+                "date": local_date,
+                "competition": competition,
+                "market": market,
+                "cutoff": cutoff,
+                **dict(aggregate),
+                "market_line_parse_success_rate": _ratio(
+                    line_denominator - aggregate["line_parse_failure_count"],
+                    line_denominator,
+                ),
+                "source_event_time_coverage": _ratio(
+                    aggregate["source_event_time_rows"], bookmaker_rows
+                ),
+            }
+        )
+
+    model_events = [event for event in events if event["event_type"] == "model_snapshot"]
+    model_grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for event in model_events:
+        local_date = parse_iso(str(event["occurred_at"])).astimezone(zone).date().isoformat()
+        model_grouped[
+            (
+                local_date,
+                str(event.get("competition") or "unknown"),
+                str(event.get("cutoff") or "unknown"),
+            )
+        ].append(event)
+    model_breakdown: list[dict[str, Any]] = []
+    for (local_date, competition, cutoff), selected in sorted(model_grouped.items()):
+        group_reasons = Counter(
+            str(reason)
+            for event in selected
+            for reason in ((event.get("details") or {}).get("ineligibility_reasons") or [])
+        )
+        collection_eligible = sum(
+            "collection_not_strict_eligible"
+            not in ((event.get("details") or {}).get("ineligibility_reasons") or [])
+            for event in selected
+        )
+        data_complete = sum(
+            not any(
+                reason != "collection_not_strict_eligible"
+                for reason in ((event.get("details") or {}).get("ineligibility_reasons") or [])
+            )
+            for event in selected
+        )
+        model_eligible = sum(event["status"] == "strict_eligible" for event in selected)
+        model_breakdown.append(
+            {
+                "date": local_date,
+                "competition": competition,
+                "cutoff": cutoff,
+                "total": len(selected),
+                "collection_eligible": collection_eligible,
+                "data_complete": data_complete,
+                "model_strict_eligible": model_eligible,
+                "market_data_complete_rate": _ratio(data_complete, len(selected)),
+                "model_eligible_rate": _ratio(model_eligible, len(selected)),
+                "ineligibility_reasons": dict(sorted(group_reasons.items())),
+            }
+        )
+    model_by_cutoff: dict[str, dict[str, int | float | None]] = {}
+    complete_by_cutoff: dict[str, float | None] = {}
+    for cutoff in sorted({str(event.get("cutoff") or "unknown") for event in model_events}):
+        selected = [
+            event for event in model_events if str(event.get("cutoff") or "unknown") == cutoff
+        ]
+        eligible = sum(event["status"] == "strict_eligible" for event in selected)
+        complete = sum(
+            not any(
+                reason != "collection_not_strict_eligible"
+                for reason in ((event.get("details") or {}).get("ineligibility_reasons") or [])
+            )
+            for event in selected
+        )
+        model_by_cutoff[cutoff] = {
+            "eligible": eligible,
+            "total": len(selected),
+            "rate": _ratio(eligible, len(selected)),
+        }
+        complete_by_cutoff[cutoff] = _ratio(complete, len(selected))
+
+    reason_counts = Counter(
+        str(reason)
+        for event in model_events
+        for reason in ((event.get("details") or {}).get("ineligibility_reasons") or [])
+    )
+    complete_events = sum(
+        not any(
+            reason != "collection_not_strict_eligible"
+            for reason in ((event.get("details") or {}).get("ineligibility_reasons") or [])
+        )
+        for event in model_events
+    )
+    mojibake_grouped: Counter[tuple[str, str, str, str]] = Counter()
+    for event in events:
+        if "mojibake" not in json_dumps(event.get("details") or {}).lower():
+            continue
+        local_date = parse_iso(str(event["occurred_at"])).astimezone(zone).date().isoformat()
+        mojibake_grouped[
+            (
+                local_date,
+                str(event.get("competition") or "unknown"),
+                str(event.get("market") or "unknown"),
+                str(event.get("cutoff") or "unknown"),
+            )
+        ] += 1
+    mojibake = sum(mojibake_grouped.values())
+    return {
+        "market_data_complete_rate": _ratio(complete_events, len(model_events)),
+        "market_data_complete_rate_by_cutoff": complete_by_cutoff,
+        "valid_bookmaker_rows_by_market": {
+            market: {
+                "snapshots": values["snapshots"],
+                "total": values["valid_bookmaker_rows"],
+                "average": (
+                    round(values["valid_bookmaker_rows"] / values["snapshots"], 6)
+                    if values["snapshots"]
+                    else None
+                ),
+            }
+            for market, values in sorted(by_market.items())
+        },
+        "market_line_parse_success_rate": {
+            market: _ratio(
+                values["bookmaker_rows"] - values["line_parse_failure_count"],
+                values["bookmaker_rows"],
+            )
+            for market, values in sorted(by_market.items())
+            if market in {"yazhi", "daxiao"}
+        },
+        "mojibake_detected_count": mojibake,
+        "source_event_time_coverage": {
+            market: _ratio(values["source_event_time_rows"], values["bookmaker_rows"])
+            for market, values in sorted(by_market.items())
+            if values["bookmaker_rows"]
+        },
+        "model_eligible_rate_by_cutoff": model_by_cutoff,
+        "collection_eligible_but_data_incomplete": sum(
+            "collection_not_strict_eligible"
+            not in ((event.get("details") or {}).get("ineligibility_reasons") or [])
+            and event["status"] != "strict_eligible"
+            for event in model_events
+        ),
+        "ineligibility_reasons": dict(sorted(reason_counts.items())),
+        "market_v2_breakdown": breakdown,
+        "model_v2_breakdown": model_breakdown,
+        "mojibake_breakdown": [
+            {
+                "date": key[0],
+                "competition": key[1],
+                "market": key[2],
+                "cutoff": key[3],
+                "count": count,
+            }
+            for key, count in sorted(mojibake_grouped.items())
+        ],
+    }
+
+
 def build_daily_report(
     config: CollectorConfig,
     state: StateStore,
@@ -152,7 +348,11 @@ def build_daily_report(
 ) -> dict[str, Any]:
     generated = generated_at or utc_now()
     start, end = day_bounds(day, config.timezone_name)
-    events = state.events_for_day(start, end)
+    events = [
+        event
+        for event in state.events_for_day(start, end)
+        if (event.get("details") or {}).get("event_origin") != "reprocess"
+    ]
     runs = state.runs_for_day(start, end)
     event_counts = Counter((event["event_type"], event["status"]) for event in events)
     locked_skips = _runner_skip_count(config, start, end)
@@ -175,6 +375,7 @@ def build_daily_report(
     result_success = event_counts[("result_candidate", "success")]
     result_missing = event_counts[("result_candidate", "missing")]
     result_metrics = _result_metrics(state, start, end)
+    market_v2_metrics = _market_v2_metrics(events, config.timezone_name)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -197,6 +398,7 @@ def build_daily_report(
             ),
             "parser_success_rate": _ratio(parser_success, parser_success + parser_failure),
             "result_candidate_coverage": result_metrics["result_candidate_coverage_24h"],
+            **market_v2_metrics,
             **result_metrics,
         },
         "event_counts": {
@@ -218,7 +420,11 @@ def build_window_report(
     generated_at: datetime | None = None,
 ) -> dict[str, Any]:
     generated = generated_at or utc_now()
-    events = state.events_for_range(start, end)
+    events = [
+        event
+        for event in state.events_for_range(start, end)
+        if (event.get("details") or {}).get("event_origin") != "reprocess"
+    ]
     runs = state.runs_for_range(start, end)
     event_counts = Counter((event["event_type"], event["status"]) for event in events)
     locked_skips = _runner_skip_count(config, start, end)
@@ -241,6 +447,7 @@ def build_window_report(
     result_success = event_counts[("result_candidate", "success")]
     result_missing = event_counts[("result_candidate", "missing")]
     result_metrics = _result_metrics(state, start, end)
+    market_v2_metrics = _market_v2_metrics(events, config.timezone_name)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -265,6 +472,7 @@ def build_window_report(
             ),
             "parser_success_rate": _ratio(parser_success, parser_success + parser_failure),
             "result_candidate_coverage": result_metrics["result_candidate_coverage_24h"],
+            **market_v2_metrics,
             **result_metrics,
         },
         "event_counts": {

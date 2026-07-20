@@ -93,6 +93,55 @@ def base_record(record_type: str, **values):
             current={"home": {"decimal": "1.9"}},
         ),
         base_record(
+            "MarketNormalization",
+            snapshot_record_id="snapshot-id",
+            market="ouzhi",
+            target="T-60m",
+            normalization_version=2,
+            parser_version="500-market-v2",
+            normalized_at="2026-07-16T01:00:00Z",
+            status="accepted",
+            valid_bookmaker_rows=3,
+            line_parse_failure_count=0,
+            snapshot_observed_at="2026-07-16T01:00:00Z",
+            quality_reasons=[],
+            decoding={},
+            reprocessed=False,
+            event_origin="live",
+        ),
+        base_record(
+            "SnapshotEligibilityAssessment",
+            snapshot_batch_record_id="batch-id",
+            target="T-60m",
+            assessment_version=2,
+            assessed_at="2026-07-16T01:00:00Z",
+            collection_eligible=True,
+            data_complete=True,
+            model_strict_eligible=True,
+            market_stats={},
+            ineligibility_reasons=[],
+            event_origin="live",
+        ),
+        base_record(
+            "HandicapIndexRow",
+            target="T-60m",
+            observed_at="2026-07-16T01:00:00Z",
+            handicap_line="-1",
+            home_index="2.0",
+            draw_index="3.0",
+            away_index="4.0",
+            raw_cells=[],
+            parser_version="500-market-v2",
+            normalization_version=2,
+            normalized_at="2026-07-16T01:00:00Z",
+            source_snapshot_record_id="snapshot-id",
+            normalization_record_id="normalization-id",
+            snapshot_observed_at="2026-07-16T01:00:00Z",
+            source_row_index=0,
+            reprocessed=False,
+            event_origin="live",
+        ),
+        base_record(
             "ResultCandidate",
             observed_at="2026-07-16T01:00:00Z",
             kickoff_at="2026-07-15T22:00:00Z",
@@ -178,6 +227,32 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
     )
     rows = [
         base_record(
+            "MarketSnapshot",
+            record_id="snapshot-before",
+            market="ouzhi",
+            target="T-60m",
+            observed_at="2026-07-16T10:00:00Z",
+            parser_version="500-market-v2",
+        ),
+        base_record(
+            "MarketNormalization",
+            record_id="normalization-before",
+            snapshot_record_id="snapshot-before",
+            market="ouzhi",
+            target="T-60m",
+            normalization_version=2,
+            parser_version="500-market-v2",
+            normalized_at="2026-07-16T15:00:00Z",
+            status="accepted",
+            valid_bookmaker_rows=3,
+            line_parse_failure_count=0,
+            snapshot_observed_at="2026-07-16T10:00:00Z",
+            quality_reasons=[],
+            decoding={},
+            reprocessed=True,
+            event_origin="reprocess",
+        ),
+        base_record(
             "BookmakerMarketRow",
             record_id="row-before",
             market="ouzhi",
@@ -186,6 +261,41 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             source_bookmaker_name="Before",
             opening={"home": {"decimal": "2.0"}},
             current={"home": {"decimal": "1.9"}},
+            parser_version="500-market-v2",
+            normalization_version=2,
+            normalized_at="2026-07-16T15:00:00Z",
+            source_snapshot_record_id="snapshot-before",
+            normalization_record_id="normalization-before",
+            snapshot_observed_at="2026-07-16T10:00:00Z",
+            source_row_index=0,
+            reprocessed=True,
+            event_origin="reprocess",
+        ),
+        base_record(
+            "MarketSnapshot",
+            record_id="snapshot-after",
+            market="ouzhi",
+            target="T-60m",
+            observed_at="2026-07-16T12:00:00Z",
+            parser_version="500-market-v2",
+        ),
+        base_record(
+            "MarketNormalization",
+            record_id="normalization-after",
+            snapshot_record_id="snapshot-after",
+            market="ouzhi",
+            target="T-60m",
+            normalization_version=2,
+            parser_version="500-market-v2",
+            normalized_at="2026-07-16T15:00:00Z",
+            status="accepted",
+            valid_bookmaker_rows=3,
+            line_parse_failure_count=0,
+            snapshot_observed_at="2026-07-16T12:00:00Z",
+            quality_reasons=[],
+            decoding={},
+            reprocessed=True,
+            event_origin="reprocess",
         ),
         base_record(
             "BookmakerMarketRow",
@@ -196,6 +306,15 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             source_bookmaker_name="After",
             opening={"home": {"decimal": "2.0"}},
             current={"home": {"decimal": "1.8"}},
+            parser_version="500-market-v2",
+            normalization_version=2,
+            normalized_at="2026-07-16T15:00:00Z",
+            source_snapshot_record_id="snapshot-after",
+            normalization_record_id="normalization-after",
+            snapshot_observed_at="2026-07-16T12:00:00Z",
+            source_row_index=0,
+            reprocessed=True,
+            event_origin="reprocess",
         ),
         base_record(
             "ResultCandidate",
@@ -232,7 +351,9 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
         raw.execute("DROP SCHEMA IF EXISTS football CASCADE")
 
     with connect(config) as connection:
-        assert apply_migrations(connection) == ["001", "002", "003", "004", "005"]
+        assert apply_migrations(connection, target_version="006") == [
+            "001", "002", "003", "004", "005", "006"
+        ]
         with connect(config) as competing:
             with import_lock(connection):
                 with pytest.raises(ImportAlreadyRunning):
@@ -250,7 +371,8 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             import_manifests(connection, config.data_dir)
         manifest_path.write_text(original_manifest, encoding="utf-8")
         first = import_jsonl_tree(connection, config.normalized_dir)
-        assert first.records_inserted == 4
+        assert first.records_inserted == 8
+        assert apply_migrations(connection, target_version="007") == ["007"]
         second = import_jsonl_tree(connection, config.normalized_dir)
         assert second.records_inserted == 0
         assert second.lines_seen == 0
@@ -258,7 +380,7 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
         connection.execute("DELETE FROM football.import_checkpoints")
         connection.commit()
         replay = import_jsonl_tree(connection, config.normalized_dir)
-        assert replay.records_existing == 4
+        assert replay.records_existing == 8
         typed_results = connection.execute(
             """
             SELECT

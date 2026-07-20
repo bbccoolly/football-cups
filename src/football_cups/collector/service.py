@@ -354,8 +354,19 @@ class CollectorService:
                 ):
                     self.data.append_normalized("market_snapshots", capture.snapshot, ingested)
                 for row in capture.rows:
-                    if self.state.claim_record(row["record_id"], "BookmakerMarketRow", ingested):
-                        self.data.append_normalized("bookmaker_market_rows", row, ingested)
+                    record_type = str(row.get("record_type"))
+                    stream = {
+                        "BookmakerMarketRow": "bookmaker_market_rows",
+                        "HandicapIndexRow": "handicap_index_rows",
+                    }.get(record_type)
+                    if stream and self.state.claim_record(row["record_id"], record_type, ingested):
+                        self.data.append_normalized(stream, row, ingested)
+                if capture.normalization and self.state.claim_record(
+                    capture.normalization["record_id"], "MarketNormalization", ingested
+                ):
+                    self.data.append_normalized(
+                        "market_normalizations", capture.normalization, ingested
+                    )
                 result = {
                     "status": "success",
                     "snapshot_record_id": capture.snapshot["record_id"],
@@ -363,6 +374,33 @@ class CollectorService:
                     "clock_ok": clock_ok,
                     "row_count": capture.snapshot["row_count"],
                     "bookmaker_count": capture.snapshot["bookmaker_count"],
+                    "normalization_record_id": (
+                        capture.normalization["record_id"] if capture.normalization else None
+                    ),
+                    "normalization_status": (
+                        capture.normalization["status"] if capture.normalization else "missing"
+                    ),
+                    "valid_bookmaker_rows": (
+                        capture.normalization["valid_bookmaker_rows"]
+                        if capture.normalization
+                        else 0
+                    ),
+                    "bookmaker_rows": (
+                        capture.normalization.get("bookmaker_rows", 0)
+                        if capture.normalization
+                        else 0
+                    ),
+                    "line_parse_failure_count": (
+                        capture.normalization.get("line_parse_failure_count", 0)
+                        if capture.normalization
+                        else 0
+                    ),
+                    "source_event_time_rows": (
+                        capture.normalization.get("source_event_time_rows", 0)
+                        if capture.normalization
+                        else 0
+                    ),
+                    "parser_version": capture.snapshot.get("parser_version"),
                 }
                 event_status = "success"
             else:
@@ -385,8 +423,29 @@ class CollectorService:
                     "error": capture.error,
                     "raw_blobs": capture.raw_blobs,
                     "snapshot_record_id": capture.snapshot["record_id"] if capture.snapshot else None,
+                    "normalization_record_id": (
+                        capture.normalization["record_id"] if capture.normalization else None
+                    ),
                 }
             )
+            if capture.normalization and int(
+                capture.normalization.get("line_parse_failure_count") or 0
+            ):
+                self.emit_quality(
+                    "market_line_unparsed",
+                    "warning",
+                    {
+                        "event_origin": "live",
+                        "normalization_record_id": capture.normalization["record_id"],
+                        "line_parse_failure_count": capture.normalization[
+                            "line_parse_failure_count"
+                        ],
+                    },
+                    fixture_id=fixture_id,
+                    competition=competition,
+                    market=market,
+                    cutoff=str(job["target"]),
+                )
             self.emit_quality(
                 "market_capture",
                 event_status,
@@ -433,6 +492,68 @@ class CollectorService:
         }
         if self.state.claim_record(batch["record_id"], "SnapshotBatch", finished):
             self.data.append_normalized("snapshot_batches", batch, finished)
+        market_stats = {
+            market: {
+                "status": results.get(market, {}).get("status", "missing"),
+                "normalization_status": results.get(market, {}).get(
+                    "normalization_status", "missing"
+                ),
+                "valid_bookmaker_rows": int(
+                    results.get(market, {}).get("valid_bookmaker_rows") or 0
+                ),
+            }
+            for market in sorted(CORE_MARKETS)
+        }
+        ineligibility_reasons: list[str] = []
+        if not strict_eligible:
+            ineligibility_reasons.append("collection_not_strict_eligible")
+        for market, stats in market_stats.items():
+            if stats["normalization_status"] != "accepted":
+                ineligibility_reasons.append(f"{market}:normalization_not_accepted")
+            if stats["valid_bookmaker_rows"] < 3:
+                ineligibility_reasons.append(f"{market}:insufficient_complete_bookmakers")
+        data_complete = not any(
+            reason != "collection_not_strict_eligible" for reason in ineligibility_reasons
+        )
+        model_strict_eligible = strict_eligible and data_complete
+        assessment = {
+            "schema_version": SCHEMA_VERSION,
+            "record_type": "SnapshotEligibilityAssessment",
+            "record_id": stable_record_id(
+                "snapshot_eligibility_assessment", batch["record_id"], 2, json_dumps(market_stats)
+            ),
+            "fixture_id": fixture_id,
+            "snapshot_batch_record_id": batch["record_id"],
+            "target": job["target"],
+            "assessment_version": 2,
+            "assessed_at": iso_utc(finished),
+            "collection_eligible": strict_eligible,
+            "data_complete": data_complete,
+            "model_strict_eligible": model_strict_eligible,
+            "market_stats": market_stats,
+            "ineligibility_reasons": ineligibility_reasons,
+            "event_origin": "live",
+        }
+        if self.state.claim_record(
+            assessment["record_id"], "SnapshotEligibilityAssessment", finished
+        ):
+            self.data.append_normalized(
+                "snapshot_eligibility_assessments", assessment, finished
+            )
+        self.emit_quality(
+            "model_snapshot",
+            "strict_eligible" if model_strict_eligible else "ineligible",
+            {
+                "event_origin": "live",
+                "assessment_record_id": assessment["record_id"],
+                "market_stats": market_stats,
+                "ineligibility_reasons": ineligibility_reasons,
+            },
+            at=finished,
+            fixture_id=fixture_id,
+            competition=competition,
+            cutoff=str(job["target"]),
+        )
         manifest = {
             "schema_version": SCHEMA_VERSION,
             "record_type": "MarketCaptureManifest",
@@ -440,6 +561,7 @@ class CollectorService:
             "job": {key: job.get(key) for key in ("job_id", "fixture_id", "target", "window_start", "window_end")},
             "captures": captures_for_manifest,
             "batch": batch,
+            "eligibility_assessment": assessment,
         }
         self.data.write_manifest("market", manifest["run_id"], manifest, finished)
         batch_status = "strict_eligible" if strict_eligible else ("complete" if core_success else "partial")

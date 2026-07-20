@@ -1,6 +1,6 @@
 # 500 足球竞彩采集器规范
 
-> 版本：V1.3
+> 版本：V1.4
 > 更新日期：2026-07-17
 
 ## 1. 来源与采集范围
@@ -8,6 +8,8 @@
 竞彩发现取以下页面 fixture ID 并集：默认页以及 `playid=269`、`312`、`271`、`270`、`272` 的 `g=2` 页面。任何包含数字型 `data-fixtureid` 的比赛都进入原始层，不按赛事、显示、销售或玩法状态过滤。
 
 每场市场包括 `ouzhi`、`yazhi`、`daxiao`、`rangqiu`。赛果候选优先来自按开球北京时间生成的 `https://live.500.com/?e=YYYYMMDD` 日期直播页；HTML 清单切换后使用页面自身加载的 `jczq/<UTC-date>Full.txt` 同源数据流回退，`shuju-<fixture_id>` 分析页只提供一致性证据。采集器不抓取新闻、伤停、阵容、天气或推荐内容。
+
+欧赔以现有 Excel 响应为主数据。亚盘、大小球和让球指数直接解析 HTML 的 `xls` 表格行，不为解析回退额外请求导出接口。HTML 解码依次采用 meta 声明、HTTP `Content-Type`、GB18030、UTF-8，来源推断只作最后候选；500 中文页不得优先选择 Latin-1。解码结果必须通过替换字符、已知乱码模式和预期表头检查。
 
 ## 2. 稳定记录
 
@@ -20,6 +22,9 @@
 - `SnapshotBatch`：目标切点、有效窗口、批次时间和资格。
 - `MarketSnapshot`：市场、原始响应、公司数、解析与来源可用状态。
 - `BookmakerMarketRow`：公司、初盘、即时盘、水位、变盘时间和原始单元格。
+- `MarketNormalization`：每个市场快照的解析版本、来源哈希、有效公司数、盘口转换失败和接受/拒绝状态。
+- `SnapshotEligibilityAssessment`：采集资格、字段完整性、模型严格资格、逐市场统计和不合格原因。
+- `HandicapIndexRow`：让球指数三项指数、概率、返还率和 Kelly；不参与 V1 模型资格。
 - `ResultCandidate` / `VerifiedResult`：候选比分与明确 90 分钟比分。
 - `QualityEvent`：所有失败、缺失、冲突、迟到、结构和时间问题。
 
@@ -40,13 +45,19 @@
 | T-30m | 截止前 5 分钟至截止 |
 | T-10m | 截止前 3 分钟至截止 |
 
-三个核心市场都在窗口内成功取得且身份、时钟无严重问题时，批次才可标记 `strict_eligible=true`。让球指数缺失不影响三核心市场资格。
+三个核心市场都在窗口内成功取得且身份、时钟无严重问题时，批次才可标记 `strict_eligible=true`。该字段只表示采集层资格。模型严格资格还要求三个核心市场均有 `status=accepted` 的 V2 标准化，且每个市场至少 3 家不同的字段完整 `bookmaker`。公司汇总行和竞彩官方行不计入门槛；没有 V2 评估时默认模型不合格。让球指数缺失或解析失败不影响三个核心市场资格。
+
+亚盘数值以主队视角保存：主让为负、受让为正，斜线盘取两端平均值，升降后缀单独保存。大小球分盘取两端平均值且两端必须相差 0.5，合法范围为 0 至 20。无法转换时保留原文、数值为空并产生 `market_line_unparsed`，不得猜测。
 
 ## 4. 存储和调度
 
 原始 blob 路径为 `data/500/raw/blobs/<前两位>/<sha256>.<ext>`。每次发现和市场任务生成唯一 manifest；标准化记录按 UTC 日期追加 JSONL。所有写入先进入同目录临时文件，再原子重命名。
 
 SQLite 表只保存比赛当前身份、任务、运行、事件、配置游标和已写记录 ID。状态库不是原始事实来源，可通过 discovery manifests 重建当前比赛和未来任务。
+
+历史盘口修复写入 `normalized/repairs/<run-id>/`，先在 `state/reparse-staging/` 生成并校验全部 JSONL、manifest 和完成标记，再原子发布。`event_origin=reprocess` 不进入实时日报和窗口验收；稳定 ID 不包含 `normalized_at`。重放不得访问网络、修改旧 blob/manifest/V1 JSONL、改变来源时间或补造迟到切点。
+
+日报和精确窗口报告按日期、赛事、市场和切点拆分 V2 证据，并至少输出 `market_data_complete_rate`、`valid_bookmaker_rows_by_market`、`market_line_parse_success_rate`、`mojibake_detected_count`、`source_event_time_coverage`、`model_eligible_rate_by_cutoff`、`collection_eligible_but_data_incomplete` 和 `ineligibility_reasons`。默认只统计 `event_origin=live`。
 
 备份使用与采集器相同的单实例锁。持锁期间固定文件清单、快照当前 UTC 日期下仍追加的 `normalized/*.jsonl` 并使用 SQLite backup API；锁释放后复制不可变文件或生成内容寻址对象。锁等待默认 300 秒，超时为可重试失败。只有源文件稳定、SQLite `quick_check=ok` 且全部对象落盘后才能写完成 manifest。`run-once` 因备份锁跳过时保存独立 `RunnerSkip` manifest，并进入日报和窗口报告。
 

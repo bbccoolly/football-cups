@@ -33,6 +33,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for name in ("init", "import-files", "import-jsonl", "status"):
         subparser = subparsers.add_parser(name)
         add_workspace_argument(subparser)
+        if name in {"init", "import-files", "import-jsonl"}:
+            subparser.add_argument("--target-version")
 
     as_of = subparsers.add_parser("as-of")
     add_workspace_argument(as_of)
@@ -65,13 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             with connect(config) as connection:
-                applied = apply_migrations(connection)
+                applied = apply_migrations(connection, target_version=args.target_version)
             print(json_dumps({"status": "initialized", "migrations_applied": applied}, indent=2))
             return 0
 
         if args.command in {"import-files", "import-jsonl"}:
             with connect(config) as connection:
-                apply_migrations(connection)
+                apply_migrations(connection, target_version=args.target_version)
                 with import_lock(connection):
                     manifests = (
                         import_manifests(connection, config.data_dir)

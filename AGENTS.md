@@ -24,6 +24,7 @@
 - 继续运行并维护比赛发现、原始响应、标准化 JSONL、质量检查和验证采集器。
 - 使用 SQLite 保存可重建的采集调度状态。
 - 建立 PostgreSQL schema、迁移、JSONL/manifest 可重放导入、质量审计和 as-of 查询。
+- 维护盘口标准化 V2、离线重放、采集资格与模型字段完整性分层，以及 V2 子窗口验收。
 - 在独立 `data/research/` 和 PostgreSQL `research` schema 中导入公开静态历史数据，运行 D-022 允许的离线研究基线。
 - 并行完成 24 小时、7 天和 30 天采集验证。
 - 准备阿里云迁移文档、Linux/systemd 适配、健康检查、精确窗口报告和可恢复备份接口。
@@ -47,6 +48,8 @@ PostgreSQL 是可重建分析层，不得成为原始事实来源。当前数据
 - 原始响应 append-only，不覆盖历史记录；同内容可按 SHA-256 去重，但每次观察必须保留独立 manifest。
 - 每条市场记录保留 `source_event_time`、`observed_at`、`ingested_at`、`corrected_at`。
 - `observed_at` 是 HTTP 响应完整接收时间；预测和回测只能使用 `observed_at <= prediction_cutoff` 的数据。
+- `SnapshotBatch.strict_eligible` 只表示采集时间、身份和时钟资格；模型资格还要求欧赔、亚盘、大小球均有已接受的 V2 标准化，且每个市场至少 3 家不同的字段完整 `bookmaker`。
+- 盘口标准化修复只能追加 `normalization_version=2` 记录并保留来源哈希；历史离线重放不得访问网络、覆盖 V1、伪造切点或进入实时 7 天/30 天指标。
 - 历史回抓统一标记 `backfill=true`、`strict_backtest_eligible=false`。
 - 历史研究记录还必须标记 `research_only=true`、`cutoff_eligible=false`，不得映射为正式预测切点。
 - 已验证赛果和已发布预测不可覆盖；冲突或修正必须形成带原因的新版本。
@@ -70,6 +73,7 @@ Agent 负责：
 - 维护发现、采集、标准化、调度、质量统计、日报、备份和恢复工具。
 - 将来源缺盘与程序失败分开统计。
 - 对身份冲突、结构变化、时间漂移、切点迟到和赛果歧义生成质量事件。
+- 维护乱码检测、盘口线转换、V2 标准化证据和模型资格原因；让球指数解析失败不得阻止三个核心市场的 V1 模型资格。
 - 维护赛事格式登记；普通联赛可自动确认，可能加时或未知赛事自动隔离，不根据名称临时猜测。
 - 维护备份新鲜度、任务日志、每月恢复演练和 Windows 无人值守任务状态。
 - 每次结束前更新项目状态；产生新决策时更新决策日志。

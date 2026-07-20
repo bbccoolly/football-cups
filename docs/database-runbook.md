@@ -1,6 +1,6 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.5
+> 版本：V1.6
 > 更新日期：2026-07-17
 
 ## 1. 本地运行方式
@@ -44,7 +44,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 
 `init` 只执行尚未应用的迁移，并拒绝已经应用后又被修改的 SQL 文件。`import-files` 先核对不可变 manifest，再按 JSONL 检查点增量导入。`import-jsonl` 只用于诊断，不替代日常 `import-files`。
 
-`status` 额外返回 `current_verified_results` 和 `strict_fixture_results_by_cutoff`。后者按不同预测切点统计不同 fixture，不能把同场多个切点相加作为阶段 4 的 500 场门禁。
+盘口 V2 使用两步迁移。维护环境可先停在 006，完成离线重放和检查后再应用007：
+
+```powershell
+.\.venv\Scripts\football-cups-db.exe init --workspace . --target-version 006
+.\.venv\Scripts\football-cups-db.exe import-files --workspace . --target-version 006
+.\.venv\Scripts\football-cups-db.exe init --workspace . --target-version 007
+```
+
+数据库已高于指定目标时会拒绝回退。已经应用的 006/007 不得修改；问题必须使用新迁移修正。当前主库已应用007，日常导入不再传 `--target-version`。
+
+`status` 额外返回 `current_verified_results`、`strict_fixture_results_by_cutoff` 和 `model_eligible_snapshots_by_cutoff`。后两者按不同预测切点统计不同 fixture，不能把同场多个切点相加作为阶段 4 的 500 场门禁。
 
 研究层使用独立入口：
 
@@ -88,6 +98,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_data
 ```
 
 输出中的 `observed_after_cutoff` 和 `corrected_after_cutoff` 必须为 0。模型和回测只能通过相同过滤语义取数。
+
+V2 输出还必须具有 `normalization_version=2` 和非空 `normalization_record_id`。同一有效行不得同时出现 V1/V2 副本；没有 V2 资格评估的批次不得出现在 `current_model_eligible_snapshot_batches`。
 
 ## 6. 外部 PostgreSQL
 

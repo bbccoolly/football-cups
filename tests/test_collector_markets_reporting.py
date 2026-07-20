@@ -5,9 +5,17 @@ from datetime import date, datetime, timedelta, timezone
 from email.utils import format_datetime
 
 import pandas as pd
+import pytest
 
 from football_cups.collector.config import CollectorConfig
 from football_cups.collector.markets import parse_market_workbook
+from football_cups.collector.markets import (
+    decode_page_with_evidence,
+    normalize_handicap_line,
+    normalize_total_line,
+    parse_market_html_v2,
+)
+from football_cups.collector.http import ObservedResponse
 from football_cups.collector.reporting import build_daily_report, build_window_report, day_bounds
 from football_cups.collector.state import StateStore
 from football_cups.collector.service import CollectorService
@@ -28,6 +36,95 @@ def workbook_bytes(rows) -> bytes:
     output = io.BytesIO()
     pd.DataFrame(rows).to_excel(output, index=False, header=False, engine="openpyxl")
     return output.getvalue()
+
+
+def observed_html(content: bytes, *, encoding: str = "ISO-8859-1") -> ObservedResponse:
+    observed = datetime(2026, 7, 15, 2, tzinfo=timezone.utc)
+    return ObservedResponse(
+        method="GET",
+        url="https://odds.500.com/fenxi/yazhi-123.shtml",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        content=content,
+        request_started_at=observed - timedelta(seconds=1),
+        response_received_at=observed,
+        source_encoding=encoding,
+    )
+
+
+def market_html(rows: list[list[str]], *, market: str = "yazhi") -> bytes:
+    header = '<div xls="header"><span row="1">header</span></div>'
+    body = []
+    for values in rows:
+        cells = "".join(f'<span row="1">{value}</span>' for value in values)
+        body.append(f'<div xls="row">{cells}</div>')
+    page = f'<html><head><meta charset="gb2312"></head><body>{header}{"".join(body)}</body></html>'
+    return page.encode("gb18030")
+
+
+def test_market_decoder_prefers_declared_chinese_encoding_over_latin1() -> None:
+    content = market_html(
+        [["公司一", "0.90", "平手/半球", "0.95", "07-15 10:00", "0.88", "半球", "0.97", "07-14 09:00"]]
+    )
+    text, evidence = decode_page_with_evidence(observed_html(content))
+    assert "平手/半球" in text
+    assert evidence["selected_encoding"] == "gb18030"
+    assert evidence["encoding_source"] == "meta"
+
+
+def test_market_decoder_never_selects_declared_latin1_for_chinese_page() -> None:
+    content = market_html(
+        [["公司一", "0.90", "平手", "0.95", "07-15 10:00", "0.88", "半球", "0.97", "07-14 09:00"]]
+    ).replace(b"gb2312", b"iso-8859-1")
+    text, evidence = decode_page_with_evidence(observed_html(content))
+    assert "公司一" in text
+    assert evidence["selected_encoding"] == "gb18030"
+    assert evidence["encoding_source"] == "gb18030_fallback"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected", "movement"),
+    [
+        ("平手", "0", "none"),
+        ("平手/半球", "-0.25", "none"),
+        ("半球/一球 升", "-0.75", "up"),
+        ("受一球/球半 降", "1.25", "down"),
+    ],
+)
+def test_handicap_line_normalization(raw, expected, movement) -> None:
+    value, actual_movement, error = normalize_handicap_line(raw)
+    assert error is None
+    assert value["decimal"] == expected
+    assert actual_movement == movement
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("2", "2"), ("2/2.5", "2.25"), ("2.5/3", "2.75")])
+def test_total_line_normalization(raw, expected) -> None:
+    value, error = normalize_total_line(raw)
+    assert error is None
+    assert value["decimal"] == expected
+
+
+def test_html_market_parser_requires_three_complete_bookmakers() -> None:
+    rows = [
+        [name, "0.90", "平手/半球", "0.95", "07-15 10:00", "0.88", "半球", "0.97", "07-14 09:00"]
+        for name in ("公司一", "公司二", "公司三")
+    ]
+    response = observed_html(market_html(rows))
+    snapshot, parsed, normalization = parse_market_html_v2(
+        response,
+        fixture_id="123",
+        market="yazhi",
+        target="T-24h",
+        kickoff_at="2026-07-16T03:00:00Z",
+        timezone_name="Asia/Shanghai",
+        raw_sha256="abc",
+    )
+    assert snapshot["parser_version"] == "500-market-v2"
+    assert len(parsed) == 3
+    assert parsed[0]["current"]["line"]["decimal"] == "-0.25"
+    assert normalization["valid_bookmaker_rows"] == 3
+    assert normalization["status"] == "accepted"
 
 
 def test_asian_market_rows_keep_raw_and_inferred_source_time() -> None:
@@ -82,6 +179,66 @@ def test_window_report_uses_exact_bounds(tmp_path) -> None:
     assert report["metrics"]["discovery_full_success_rate"] == 0.5
     assert report["event_counts"]["discovery_poll:full"] == 1
     assert report["event_counts"]["discovery_poll:partial"] == 1
+
+
+def test_window_report_includes_v2_market_quality_breakdown(tmp_path) -> None:
+    config = config_for(tmp_path)
+    start = datetime(2026, 7, 17, 0, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    with StateStore(config) as state:
+        state.add_event(
+            "market_capture",
+            "success",
+            {
+                "parser_version": "500-market-v2",
+                "valid_bookmaker_rows": 3,
+                "bookmaker_rows": 4,
+                "line_parse_failure_count": 1,
+                "source_event_time_rows": 2,
+            },
+            occurred_at=start,
+            competition="League",
+            market="yazhi",
+            cutoff="T-24h",
+        )
+        state.add_event(
+            "model_snapshot",
+            "ineligible",
+            {
+                "event_origin": "live",
+                "ineligibility_reasons": ["yazhi:insufficient_complete_bookmakers"],
+            },
+            occurred_at=start,
+            competition="League",
+            cutoff="T-24h",
+        )
+        report = build_window_report(config, state, start, end, generated_at=end)
+
+    metrics = report["metrics"]
+    assert metrics["valid_bookmaker_rows_by_market"]["yazhi"]["total"] == 3
+    assert metrics["market_line_parse_success_rate"]["yazhi"] == 0.75
+    assert metrics["source_event_time_coverage"]["yazhi"] == 0.5
+    assert metrics["market_data_complete_rate"] == 0.0
+    assert metrics["collection_eligible_but_data_incomplete"] == 1
+    assert metrics["ineligibility_reasons"] == {
+        "yazhi:insufficient_complete_bookmakers": 1
+    }
+    assert metrics["market_v2_breakdown"][0]["competition"] == "League"
+    assert metrics["model_v2_breakdown"] == [
+        {
+            "date": "2026-07-17",
+            "competition": "League",
+            "cutoff": "T-24h",
+            "total": 1,
+            "collection_eligible": 1,
+            "data_complete": 0,
+            "model_strict_eligible": 0,
+            "market_data_complete_rate": 0.0,
+            "model_eligible_rate": 0.0,
+            "ineligibility_reasons": {"yazhi:insufficient_complete_bookmakers": 1},
+        }
+    ]
+    assert metrics["mojibake_breakdown"] == []
 
 
 def test_window_report_counts_runner_lock_skips_from_immutable_manifests(tmp_path) -> None:

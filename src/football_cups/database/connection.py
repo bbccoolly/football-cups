@@ -43,8 +43,12 @@ def migration_files() -> Iterator[Path]:
     yield from sorted(folder.glob("*.sql"))
 
 
-def apply_migrations(connection: Connection) -> list[str]:
+def apply_migrations(connection: Connection, *, target_version: str | None = None) -> list[str]:
     applied_now: list[str] = []
+    files = list(migration_files())
+    versions = [path.stem.partition("_")[0] for path in files]
+    if target_version is not None and target_version not in versions:
+        raise ValueError(f"unknown migration target: {target_version}")
     with connection.transaction():
         connection.execute(BOOTSTRAP_SQL, prepare=False)
         existing = {
@@ -53,8 +57,16 @@ def apply_migrations(connection: Connection) -> list[str]:
                 "SELECT version, name, sha256 FROM football.schema_migrations"
             ).fetchall()
         }
-        for path in migration_files():
+        if target_version is not None and any(
+            version > target_version for version in existing
+        ):
+            raise ValueError(
+                f"database is already newer than requested target {target_version}"
+            )
+        for path in files:
             version, _, name = path.stem.partition("_")
+            if target_version is not None and version > target_version:
+                break
             sql = path.read_text(encoding="utf-8")
             digest = hashlib.sha256(sql.encode("utf-8")).hexdigest()
             prior = existing.get(version)
