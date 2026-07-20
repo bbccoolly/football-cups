@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "description": "Explicit research-to-live competition mapping for shadow prediction reports. Empty mappings mean no cross-source calibration or fuzzy merge is enabled.",
+  "mappings": []
+}

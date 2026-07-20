@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from football_cups.database.config import DatabaseConfig
 from football_cups.database.connection import apply_migrations, connect
 
-from . import RESEARCH_FLAGS, SCHEMA_VERSION
+from . import SCHEMA_VERSION, research_flags
 from .config import ResearchConfig
 
 
@@ -25,6 +25,12 @@ SUPPORTED_TYPES = frozenset(
         "ResearchMarketObservation",
         "ResearchFeatureRow",
         "ResearchQualityEvent",
+        "ResearchModelDataset",
+        "ResearchModelVersion",
+        "ResearchModelActivation",
+        "ResearchShadowPrediction",
+        "ResearchRetrospectiveEvaluation",
+        "ResearchShadowEvaluation",
     }
 )
 
@@ -58,8 +64,12 @@ def _validate(record: Any, source_file: str, line_number: int) -> dict[str, Any]
         raise ResearchImportError(f"{source_file}:{line_number}: unsupported record type")
     if not isinstance(record.get("record_id"), str) or not record["record_id"]:
         raise ResearchImportError(f"{source_file}:{line_number}: invalid record id")
-    for key, expected in RESEARCH_FLAGS.items():
-        if record.get(key) is not expected:
+    kind = str(record.get("research_kind") or "historical")
+    expected_flags = research_flags(kind)
+    for key, expected in expected_flags.items():
+        if key == "research_kind" and "research_kind" not in record and kind == "historical":
+            continue
+        if record.get(key) != expected:
             raise ResearchImportError(f"{source_file}:{line_number}: invalid research flag {key}")
     return record
 
@@ -181,6 +191,131 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 record["event_type"],
                 record["status"],
                 Jsonb(record.get("details") or {}),
+            ),
+        )
+    elif record_type == "ResearchModelDataset":
+        connection.execute(
+            """
+            INSERT INTO research.model_datasets(
+                record_id, model_key, dataset_hash, training_before_date,
+                created_at, source_record_count, fixture_count, feature_schema,
+                training_fixture_ids, evaluation_fixture_ids, payload
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                record["model_key"],
+                record["dataset_hash"],
+                record["training_before_date"],
+                record["created_at"],
+                record["source_record_count"],
+                record["fixture_count"],
+                record["feature_schema"],
+                Jsonb(record.get("training_fixture_ids") or []),
+                Jsonb(record.get("evaluation_fixture_ids") or []),
+                Jsonb(record),
+            ),
+        )
+    elif record_type == "ResearchModelVersion":
+        connection.execute(
+            """
+            INSERT INTO research.model_versions(
+                record_id, model_key, model_version, dataset_record_id,
+                trained_at, algorithm, artifact_json, metrics
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                record["model_key"],
+                record["model_version"],
+                record["dataset_record_id"],
+                record["trained_at"],
+                record["algorithm"],
+                Jsonb(record.get("artifact") or {}),
+                Jsonb(record.get("metrics") or {}),
+            ),
+        )
+    elif record_type == "ResearchModelActivation":
+        connection.execute(
+            """
+            INSERT INTO research.model_activations(
+                record_id, channel, model_key, model_version, model_record_id,
+                activated_at, active_from, active_until, status, notes
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                record["channel"],
+                record["model_key"],
+                record["model_version"],
+                record["model_record_id"],
+                record["activated_at"],
+                record.get("active_from"),
+                record.get("active_until"),
+                record["status"],
+                record.get("notes"),
+            ),
+        )
+    elif record_type == "ResearchShadowPrediction":
+        connection.execute(
+            """
+            INSERT INTO research.shadow_predictions(
+                record_id, channel, fixture_id, target, prediction_cutoff,
+                published_at, status, model_key, model_version,
+                activation_record_id, selected_batch_record_id,
+                source_snapshot_record_id, market_observed_at, bookmaker_count,
+                probabilities, features, abstention_reason
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
+            ) ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                record["channel"],
+                str(record["fixture_id"]),
+                record["target"],
+                record["prediction_cutoff"],
+                record["published_at"],
+                record["status"],
+                record.get("model_key"),
+                record.get("model_version"),
+                record.get("activation_record_id"),
+                record.get("selected_batch_record_id"),
+                record.get("source_snapshot_record_id"),
+                record.get("market_observed_at"),
+                record.get("bookmaker_count"),
+                Jsonb(record.get("probabilities") or {}),
+                Jsonb(record.get("features") or {}),
+                record.get("abstention_reason"),
+            ),
+        )
+    elif record_type in {"ResearchRetrospectiveEvaluation", "ResearchShadowEvaluation"}:
+        table = (
+            "retrospective_evaluations"
+            if record_type == "ResearchRetrospectiveEvaluation"
+            else "shadow_evaluations"
+        )
+        connection.execute(
+            f"""
+            INSERT INTO research.{table}(
+                record_id, model_key, model_version, evaluated_at,
+                evaluation_kind, dataset_hash, metrics, payload
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                record.get("model_key"),
+                record.get("model_version"),
+                record["evaluated_at"],
+                record["evaluation_kind"],
+                record.get("dataset_hash"),
+                Jsonb(record.get("metrics") or {}),
+                Jsonb(record),
             ),
         )
 
@@ -312,10 +447,23 @@ def run_database_import(config: ResearchConfig) -> dict[str, Any]:
         }
         if before != after:
             raise RuntimeError("research import changed strict fixture counts")
+        count_tables = (
+            "source_assets",
+            "fixtures",
+            "market_observations",
+            "feature_rows",
+            "quality_events",
+            "model_datasets",
+            "model_versions",
+            "model_activations",
+            "shadow_predictions",
+            "retrospective_evaluations",
+            "shadow_evaluations",
+        )
         counts = {
             table: int(
                 connection.execute(f"SELECT count(*) AS count FROM research.{table}").fetchone()["count"]
             )
-            for table in ("source_assets", "fixtures", "market_observations", "feature_rows", "quality_events")
+            for table in count_tables
         }
     return {**summary, "migrations_applied": migrations, "counts": counts, "strict_counts": after}

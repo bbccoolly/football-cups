@@ -3,6 +3,7 @@ param(
     [string]$Workspace = "",
     [string]$UserName = "football-cups-runner",
     [string]$TaskName = "FootballCups-Database-Import",
+    [string]$ShadowTaskName = "FootballCups-Research-Shadow-Prediction",
     [switch]$SkipTaskRegistration
 )
 
@@ -13,6 +14,7 @@ if (-not $Workspace) {
 $workspacePath = (Resolve-Path -LiteralPath $Workspace).Path
 $identity = "$env:COMPUTERNAME\$UserName"
 $taskInstaller = Join-Path $workspacePath "scripts\windows\install_database_import_task.ps1"
+$shadowTaskInstaller = Join-Path $workspacePath "scripts\windows\install_shadow_prediction_task.ps1"
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]$currentIdentity
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -200,11 +202,15 @@ if ($PSCmdlet.ShouldProcess($identity, "Grant least-privilege project and data A
 }
 
 $taskRegistered = $false
+$shadowTaskRegistered = $false
 $taskLogonType = "NotRegistered"
 if (-not $SkipTaskRegistration -and
-    $PSCmdlet.ShouldProcess($TaskName, "Rotate the local task password and register the database task")) {
+    $PSCmdlet.ShouldProcess($identity, "Rotate the local task password and register database plus shadow tasks")) {
     if (-not (Test-Path -LiteralPath $taskInstaller)) {
         throw "Database task installer not found: $taskInstaller"
+    }
+    if (-not (Test-Path -LiteralPath $shadowTaskInstaller)) {
+        throw "Shadow prediction task installer not found: $shadowTaskInstaller"
     }
     $passwordText = New-RandomPassword
     $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
@@ -225,6 +231,13 @@ if (-not $SkipTaskRegistration -and
             -PasswordLogon `
             -Password $password
         $taskRegistered = $true
+        & $shadowTaskInstaller `
+            -Workspace $workspacePath `
+            -TaskName $ShadowTaskName `
+            -UserId $identity `
+            -PasswordLogon `
+            -Password $password
+        $shadowTaskRegistered = $true
         $taskLogonType = "Password"
     }
     finally {
@@ -242,5 +255,7 @@ if (-not $SkipTaskRegistration -and
     DataPermission = "Modify"
     TaskName = $TaskName
     TaskRegistered = $taskRegistered
+    ShadowTaskName = $ShadowTaskName
+    ShadowTaskRegistered = $shadowTaskRegistered
     TaskLogonType = $taskLogonType
 }

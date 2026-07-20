@@ -10,6 +10,14 @@ import psycopg
 from .config import ResearchConfig
 from .database import ResearchImportError, run_database_import
 from .http import AccessPolicyError, BudgetExceeded, IntegrityError, ResearchHttpError, fetch_assets
+from .modeling import (
+    CHANNEL_DEFAULT,
+    ResearchModelError,
+    evaluate_shadow_predictions,
+    publish_shadow_predictions,
+    train_devig_consensus_model,
+    write_model_dataset,
+)
 from .normalize import (
     ResearchIntegrityError,
     ResearchNormalizeError,
@@ -50,6 +58,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for command in ("db-import", "report-coverage", "evaluate-baseline"):
         subparser = subparsers.add_parser(command)
         _workspace(subparser)
+
+    dataset = subparsers.add_parser("build-model-dataset")
+    _workspace(dataset)
+    dataset.add_argument("--training-before-date", required=True)
+
+    train = subparsers.add_parser("train-model")
+    _workspace(train)
+    train.add_argument("--training-before-date", required=True)
+    train.add_argument("--channel", default=CHANNEL_DEFAULT)
+    train.add_argument("--activate", action="store_true")
+
+    shadow = subparsers.add_parser("shadow-predict")
+    _workspace(shadow)
+    shadow.add_argument("--channel", default=CHANNEL_DEFAULT)
+    shadow.add_argument(
+        "--target",
+        action="append",
+        choices=["T-24h", "T-6h", "T-60m", "T-10m"],
+        help="May be repeated. Defaults to all product cutoffs.",
+    )
+    shadow.add_argument("--dry-run", action="store_true")
+    shadow.add_argument("--lookahead-hours", type=int, default=48)
+    shadow.add_argument("--lookback-hours", type=int, default=2)
+
+    shadow_eval = subparsers.add_parser("evaluate-shadow")
+    _workspace(shadow_eval)
+    shadow_eval.add_argument("--channel", default=CHANNEL_DEFAULT)
     return parser.parse_args(argv)
 
 
@@ -126,7 +161,38 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-    except (ValueError, ResearchNormalizeError, ResearchImportError) as exc:
+        if args.command == "build-model-dataset":
+            result = write_model_dataset(
+                config,
+                training_before_date=_date(args.training_before_date),
+            )
+            print(json_dumps(result, indent=2))
+            return 0
+        if args.command == "train-model":
+            result = train_devig_consensus_model(
+                config,
+                training_before_date=_date(args.training_before_date),
+                activate=bool(args.activate),
+                channel=args.channel,
+            )
+            print(json_dumps(result, indent=2))
+            return 0
+        if args.command == "shadow-predict":
+            result = publish_shadow_predictions(
+                config,
+                channel=args.channel,
+                targets=args.target or ["T-24h", "T-6h", "T-60m", "T-10m"],
+                dry_run=bool(args.dry_run),
+                lookahead_hours=args.lookahead_hours,
+                lookback_hours=args.lookback_hours,
+            )
+            print(json_dumps(result, indent=2))
+            return 0
+        if args.command == "evaluate-shadow":
+            result = evaluate_shadow_predictions(config, channel=args.channel)
+            print(json_dumps(result, indent=2))
+            return 0
+    except (ValueError, ResearchNormalizeError, ResearchImportError, ResearchModelError) as exc:
         print(json_dumps({"status": "invalid", "error_type": type(exc).__name__, "error": str(exc)}, indent=2))
         return 2
     except (AccessPolicyError, BudgetExceeded, IntegrityError, ResearchIntegrityError) as exc:

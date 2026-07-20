@@ -1,6 +1,6 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.9
+> 版本：V2.0
 > 更新日期：2026-07-20
 
 ## 1. 本地运行方式
@@ -52,7 +52,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 .\.venv\Scripts\football-cups-db.exe init --workspace . --target-version 007
 ```
 
-数据库已高于指定目标时会拒绝回退。已经应用的 006/007/008/009/010/011 不得修改；问题必须使用新迁移修正。迁移 008 为无效 fixture 建立逻辑排除视图，迁移 009 为中国体彩官方 90 分钟赛果增加证据表和候选引用字段，迁移010增加不完整清单失败原因和映射身份记录引用，迁移011增加负责人声明字段并收紧人工结果的 current/strict 资格，日常导入不再传 `--target-version`。
+数据库已高于指定目标时会拒绝回退。已经应用的 006/007/008/009/010/011/012 不得修改；问题必须使用新迁移修正。迁移 008 为无效 fixture 建立逻辑排除视图，迁移 009 为中国体彩官方 90 分钟赛果增加证据表和候选引用字段，迁移010增加不完整清单失败原因和映射身份记录引用，迁移011增加负责人声明字段并收紧人工结果的 current/strict 资格，迁移012增加隔离影子预测研究表和 `research_kind` 约束，日常导入不再传 `--target-version`。
 
 `status` 额外返回 `current_verified_results`、`verified_result_count_by_method`、`current_invalid_fixtures`、四张 `sporttery_*` 官方证据表、`strict_fixture_results_by_cutoff` 和 `model_eligible_snapshots_by_cutoff`。无效 fixture 和没有完整候选引用的旧人工记录不进入当前已验证赛果、严格赛果或模型合格快照计数；按切点统计时不能把同场多个切点相加作为阶段 4 的 500 场门禁。
 
@@ -65,6 +65,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 ```
 
 命令会应用未执行迁移、使用独立 advisory lock 和文件哈希检查点，并在导入前后比较 `football.strict_fixture_results_by_cutoff`。计数变化时立即失败。研究层可删除后从 `data/research/normalized/` 重放，但不得并入正式导入任务。
+
+影子预测同样走研究 importer。`research.model_datasets`、`model_versions`、`model_activations`、`shadow_predictions` 和评估表只服务 D-029 隔离研究；`shadow_predictions` 的发布唯一键为 `(channel, fixture_id, target, prediction_cutoff)`，重复导入必须新增0。研究导入仍不得改变正式严格切点计数。
 
 退出码：
 
@@ -81,12 +83,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_da
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_database_task_user.ps1 -Workspace .
 ```
 
-当前任务名为 `FootballCups-Database-Import`。专用账户属于内置 `Users` 但不属于 `Administrators`，只获得代码和 Python 基础运行时读取/执行、`data/` 修改及 `.env` 读取权限。任务使用 Task Scheduler `Password` 登录类型，随机凭据只由 Windows LSA 加密保存，不进入任务 XML、文件或日志。任务会先启动本地 PostgreSQL，再运行 `import-files`。不得改用管理员组账户伪装完成重启验收。
+当前数据库任务名为 `FootballCups-Database-Import`。同一配置脚本还会注册 `FootballCups-Research-Shadow-Prediction`，每2分钟运行一次 `shadow-predict` 并随后执行研究 `db-import`。专用账户属于内置 `Users` 但不属于 `Administrators`，只获得代码和 Python 基础运行时读取/执行、`data/` 修改及 `.env` 读取权限。任务使用 Task Scheduler `Password` 登录类型，随机凭据只由 Windows LSA 加密保存，不进入任务 XML、文件或日志。任务会先启动本地 PostgreSQL，再运行对应导入命令。不得改用管理员组账户伪装完成重启验收。
 
 当前独立主机实测拒绝管理员为另一个本地标准账户注册 S4U，即使已授予批处理登录权；因此 D-021 接受上述本机密码登录兼容路径。若迁移到域账户或新的 Windows 主机，应重新评估能否恢复 S4U，而不是复制现有本机凭据。卸载：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_database_import_task.ps1 -Workspace . -Uninstall
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\install_shadow_prediction_task.ps1 -Workspace . -Uninstall
 ```
 
 ## 5. As-Of 查询

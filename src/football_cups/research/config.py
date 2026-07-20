@@ -66,6 +66,10 @@ class ResearchConfig:
         return self.research_dir / "state" / "research.sqlite3"
 
     @property
+    def lock_path(self) -> Path:
+        return self.research_dir / "state" / "research-facts.lock"
+
+    @property
     def normalized_dir(self) -> Path:
         return self.research_dir / "normalized"
 
@@ -76,6 +80,7 @@ class ResearchConfig:
             "normalized",
             "reports/coverage",
             "reports/evaluation",
+            "reports/shadow",
             "quarantine",
             "state",
         ):

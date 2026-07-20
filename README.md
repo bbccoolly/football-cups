@@ -6,11 +6,11 @@
 
 ## 当前状态
 
-项目处于“阶段 3：标准化数据库”。项目负责人已授权在采集验证继续运行的同时提前建设 PostgreSQL 可重建分析层；这不代表 24 小时、7 天或 30 天采集验收已经通过。当前仍不开发模型或 Web 产品，也不将验证采集器标记为长期生产可用。
+项目处于“阶段 3：标准化数据库”。项目负责人已授权在采集验证继续运行的同时提前建设 PostgreSQL 可重建分析层；这不代表 24 小时、7 天或 30 天采集验收已经通过。当前仍不开发正式模型或 Web 产品，也不将验证采集器标记为长期生产可用。
 
 盘口标准化 V2 已上线：亚盘、大小球和让球指数改为正确解码后的 HTML 直解析，历史 V1 保留并通过离线重放追加 V2 证据。采集成功与模型字段完整性已经分层；每个核心市场至少需要 3 家完整 bookmaker。V2 的 7 天和 30 天子窗口正在重新累计。
 
-当前进度及唯一下一步见 `docs/project-status.md`。隔离的公开历史研究基线已经可运行，但不属于正式阶段 4。阿里云杭州 ECS 已创建，但目前只允许隔离 smoke；数据盘、OSS 和正式切换门禁尚未完成。
+当前进度及唯一下一步见 `docs/project-status.md`。隔离的公开历史研究基线和 research-only 影子预测能力已经可运行，但不属于正式阶段 4。阿里云杭州 ECS 已创建，但目前只允许隔离 smoke；数据盘、OSS 和正式切换门禁尚未完成。
 
 ## 文档入口
 
@@ -89,6 +89,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 .\.venv\Scripts\football-cups-research.exe db-import --workspace .
 .\.venv\Scripts\football-cups-research.exe report-coverage --workspace .
 .\.venv\Scripts\football-cups-research.exe evaluate-baseline --workspace .
+```
+
+隔离影子预测只输出当前比赛的 90 分钟胜/平/负概率，不发布 Web/API，也不计入正式模型门禁：
+
+```powershell
+.\.venv\Scripts\football-cups-research.exe train-model `
+  --workspace . `
+  --training-before-date 2026-01-01 `
+  --activate `
+  --channel research-shadow-v1
+.\.venv\Scripts\football-cups-research.exe db-import --workspace .
+.\.venv\Scripts\football-cups-research.exe shadow-predict --workspace . --channel research-shadow-v1
 ```
 
 该路线不抓取 500 历史页面，不进入正式 `football` schema，也不能替代严格前瞻验收。来源、K1 导入和访问频率规则见 `docs/research-data-acquisition-plan.md`。

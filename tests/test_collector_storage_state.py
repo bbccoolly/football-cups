@@ -233,6 +233,29 @@ def test_oss_backup_requires_complete_marker_and_restores_hashes(tmp_path) -> No
     assert (restored / "state" / "collector.sqlite3").is_file()
 
 
+def test_oss_backup_includes_research_facts_with_prefix(tmp_path) -> None:
+    config = CollectorConfig(
+        workspace=tmp_path,
+        data_dir=tmp_path / "data" / "500",
+        backup_dir=None,
+        oss_backup_dir=tmp_path / "oss",
+    )
+    now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    DataStore(config).write_manifest("test", "run-one", {"value": 1}, now)
+    research_file = tmp_path / "data" / "research" / "normalized" / "shadow" / "run" / "records.jsonl"
+    research_file.parent.mkdir(parents=True)
+    research_file.write_text('{"record_id":"shadow"}\n', encoding="utf-8")
+    with StateStore(config):
+        pass
+
+    result = run_oss_backup(config, now=now)
+    restored = tmp_path / "restored"
+    verify_oss_backup(config, run_id=result["run_id"], target=restored)
+
+    assert (restored / "research" / "normalized" / "shadow" / "run" / "records.jsonl").is_file()
+    assert not (restored / "research" / "state" / "research-facts.lock").exists()
+
+
 def test_incremental_backup_uses_completed_manifest_and_sqlite_snapshot(tmp_path) -> None:
     config = CollectorConfig(
         workspace=tmp_path,

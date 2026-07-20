@@ -2,7 +2,7 @@
 
 > 更新日期：2026-07-20
 > 当前阶段：阶段 3 - 标准化数据库
-> 阶段状态：正式数据库持续导入；隔离历史研究基线已完成；采集验证并行运行
+> 阶段状态：正式数据库持续导入；隔离历史研究基线与影子预测能力已实施；采集验证并行运行
 
 本文件是当前进度的唯一入口。产品边界见 `docs/product-plan.md`，阶段门槛见 `docs/execution-plan.md`，历史决策见 `docs/decision-log.md`。
 
@@ -65,6 +65,7 @@
 - [x] 完成 PostgreSQL `004`、`005` 研究迁移和独立 importer；首次123,497条、质量事件增量514条、重复导入0条，正式各切点计数保持4。
 - [x] 生成覆盖和时间分离评估报告；世界杯514场口径歧义逐场形成质量事件。
 - [x] 历史研究改动通过85项测试，包含正式与研究 importer 的真实 PostgreSQL 空库重放和隔离验证。
+- [x] 完成历史研究数据统计整理，新增 `docs/historical-research-statistics.md`；重新生成 coverage 与 baseline 报告，确认研究层为7,404场/派生行、116,073条市场观察、6,890场研究可用赛果，Football-Data 2026 closing 去水市场 Log Loss 为0.9876。
 - [x] 完成 Windows 重启无人值守验证：G盘映射保持、PostgreSQL自动启动、数据库导入返回0、采集在10分钟内恢复并刷新完整发现。
 - [x] 记录 D-023，完成盘口标准化 V2：中文页可靠解码、亚盘/大小球数值化、三类非欧赔市场 HTML 直解析、公司角色分类和独立让球指数记录。
 - [x] 完成141个既有市场 manifest 的全量离线审计与重放：零网络请求、零乱码、零已知盘口转换失败、零 HTML/Excel 数值差异。
@@ -86,20 +87,26 @@
 - [x] 项目负责人声明的8场欧战/世界杯候选已一次批量确认，重复执行新增0；`ResultCandidate=54`保持不变，`VerifiedResult/current_verified_results`从34增至42。
 - [x] 人工与自动指标已分离；体彩官方补偿会继续检查人工声明结果，官方一致时追加自动证据，不一致时产生冲突并退出严格资格。
 - [x] 上线前后各完成一次G盘镜像和内容寻址备份；确认后批次分别为 `20260720T050659064134Z-4a9d06c5` 和 `20260720T050709000256Z-e0199b1c`，覆盖3397个文件且SQLite校验正常。
+- [x] 记录 D-029，允许隔离 research-only 影子预测；不解除正式阶段4、Web/API 或投注输出门禁。
+- [x] 完成迁移012、研究 flag V2 校验、模型数据集/版本/激活/影子预测/评估表和独立 importer 类型分派。
+- [x] 实现 `football-cups-research build-model-dataset`、`train-model`、`shadow-predict` 和 `evaluate-shadow`；影子预测只读取 live V2 合格欧赔快照，并按真实发布窗口写入或 abstain。
+- [x] 注册 `FootballCups-Research-Shadow-Prediction` 独立 Windows 任务；数据库任务和影子任务均使用 `football-cups-runner` 的 Task Scheduler `Password` 登录、`Limited`、`IgnoreNew`。
+- [x] G 盘每日镜像和内容寻址备份纳入 `data/research`，以 `research/...` 前缀保存，并使用 `research-facts.lock` 防止研究写入并发。
 
 ## 当前目标
 
-保持采集和数据库导入任务连续运行，完成发现、赛果和盘口 V2 各自的连续子窗口。盘口 V2 的 7 天与 30 天子窗口从 2026-07-17 17:56:56 Asia/Shanghai 计时；历史离线重放不计入。持续积累自动候选、已验证赛果和隔离证据。阶段 4 仍需按切点至少 500 个不同 fixture 同时具有模型严格快照及唯一有效赛果；D-022 只允许离线历史研究，当前不得开始正式模型。
+保持采集、数据库导入和影子预测任务连续运行，完成发现、赛果和盘口 V2 各自的连续子窗口。盘口 V2 的 7 天与 30 天子窗口从 2026-07-17 17:56:56 Asia/Shanghai 计时；历史离线重放不计入。持续积累自动候选、已验证赛果和隔离证据。阶段 4 仍需按切点至少 500 个不同 fixture 同时具有模型严格快照及唯一有效赛果；D-029 的影子预测只能用于研究观察，当前不得作为正式模型、Web/API 或阶段4结论。
 
 阿里云杭州 ECS 已完成隔离 smoke，但根据 D-018 暂缓购买数据盘并暂停正式迁移。没有正式数据盘前，ECS 只作为部署验证和未来迁移预备环境；Windows 本地继续作为唯一正式采集写入者。未来重新启动云端切换前仍必须完成精确 24 小时窗口报告、人工抽查、至少 100 GB 数据盘、真实 OSS 恢复和云端完整 smoke。
 
 ## 当前运行证据
 
-截至 2026-07-20 13:08 Asia/Shanghai：
+截至 2026-07-20 14:26 Asia/Shanghai：
 
-- 本地增强 `health=ok`：最后心跳约26秒，完整发现和时钟检查约92秒，SQLite `quick_check=ok`，0个逾期任务，56个未来待办；每日和每周G盘备份均为 `ok`。
+- 本地增强 `health=ok`：最后心跳约77秒，完整发现和时钟检查约17分钟，SQLite `quick_check=ok`，0个逾期任务，56个未来待办；每日和每周G盘备份均为 `ok`。
 - 人工确认当日日报中，自动已验证覆盖率保持 `88.8889%`，人工声明覆盖率单列为 `11.1111%`，合并已验证覆盖率为100%；体彩567和自动验收结论未被改写。
-- 数据库导入检查点为69个文件、181,186行；主库 `records=181,186`、`collection_manifests=628`、`quality_events=10,913`、`ResultCandidate=54`、`VerifiedResult=42`、`current_verified_results=42`、`current_invalid_fixtures=1`、`unsupported_records=0`。
+- 数据库导入检查点为69个文件、181,586行；主库 `records=181,586`、`collection_manifests=630`、`quality_events=10,977`、`ResultCandidate=54`、`VerifiedResult=42`、`current_verified_results=42`、`current_invalid_fixtures=1`、`unsupported_records=0`。
+- 历史研究统计已重新生成：coverage 报告 `20260720T062410389935Z-b9974fa6`，baseline 报告 `20260720T062422647516Z-2c22adc4`；数据集哈希 `d58d611927407b6ce5a32047b1f7c831f8ddf48763a54c7e8c8d48a930ac5c84` 与既有研究层一致。
 - 原8场口径歧义候选已经项目负责人声明为常规时间，新增8条 append-only 已验证结果；自动方法仍为 `500-two-page-regular-time-competition=30`、`500-analysis-pair-regular-time-competition=4`，人工方法为 `project-owner-manual-declaration=8`。
 - 阶段 4 严格快照加已验证赛果计数：`T-48h=4`、`T-24h=25`、`T-12h=30`、`T-6h=41`、`T-3h=41`、`T-60m=41`、`T-30m=41`、`T-10m=41`；距离各切点500场门槛仍很远。
 - 主库已应用迁移011；首次人工结果导入新增16条（8条结果、8条质量事件），第二次导入新增0。重复确认8场返回 `confirmed_count=0`、`unchanged_count=8`。
@@ -107,6 +114,15 @@
 - 中国体彩官方页面通过标准 headless Edge 能看到“全场比分（90分钟）包含伤停补时阶段”，但页面自身的 `getUniformMatchResultV1` XHR 以及标准浏览器直接访问均返回 EdgeOne 567/CORS；`getMatchHeadV1` 同样567，`getFixedBonusV1` 当前仍为200。不能在缺少完整清单和双详情一致性时写入官方比分。
 - 首次低频自动 `--apply` 处理7场歧义 fixture，保存3条 scope、3条不完整清单和7条失败映射证据，0条官方观察、0条官方候选、0条新增验证。修正后指定 fixture `1359167` smoke 返回 `partial/failure=1`；审计为 `warning`，明确报告3个不完整清单、7个非 accepted link和0个官方已验证赛果。
 - 主库已应用迁移009/010/011；`sporttery_scope_evidence=3`、`sporttery_inventory_batches=3`、`sporttery_fixture_links=7`、`sporttery_result_observations=0`。人工确认不改变官方证据计数；下次自动官方补偿为2026-07-21 11:57 Asia/Shanghai，并会继续检查仍在8天窗口内的人工声明结果。
+
+截至 2026-07-20 18:20 Asia/Shanghai 的影子预测实施证据：
+
+- 主库已应用迁移012；`research.model_datasets=1`、`model_versions=1`、`model_activations=1`、`shadow_predictions=0`、`shadow_evaluations=1`，正式 `football.records` 未被研究导入污染。
+- `devig-consensus-v1` 训练/激活完成：数据集哈希 `998a80d6d3aaae67285fd536232a32e97f9f6e3bb24d6544477447d1d176896a`，3396场多公司 closing 1X2 样本，训练2447场，2026时间分离评估949场。
+- 模型版本 `devig-consensus-v1-998a80d6d3aa-20260720T101711Z`；训练 Log Loss `0.9727`，2026时间分离 Log Loss `0.9920`。该指标仅为研究观察，不是正式阶段4模型结论。
+- 手工执行 `shadow-predict` 返回 `unchanged`，因为当前没有位于真实发布窗口的新机会；没有历史补发预测。
+- `FootballCups-Research-Shadow-Prediction` 手工触发返回0；重新注册后的 `FootballCups-Database-Import` 手工触发也返回0。两者均为 `football-cups-runner`、`Password`、`Limited`、`IgnoreNew`。
+- 研究导入幂等复查新增0；`strict_fixture_results_by_cutoff` 保持 `T-48h=4`、`T-24h=25`、`T-12h=30`、`T-6h/T-3h/T-60m/T-30m/T-10m=41`。
 
 截至 2026-07-17 18:02 Asia/Shanghai 的盘口 V2 上线证据：
 
@@ -191,7 +207,8 @@
 - ECS 当前只有 40 GB 系统盘；根据 D-017 和 D-018，只能用于隔离 smoke，暂不购买数据盘，至少 100 GB 数据盘挂载并通过重启验证前不得启用正式 timer。
 - ECS 尚未安装 PostgreSQL 17、私有 OSS/RAM Role 和正式环境文件；这些工作暂停，必须等待正式数据盘和重新启动云端迁移决策。
 - ECS smoke 健康状态为 `warning`，唯一原因是隔离环境未执行正式 `run-once`，因而没有心跳；这不等于正式运行健康验收通过。
-- 备份代码、S4U 任务和真实任务批次恢复均已完成；后续必须持续检查备份年龄，并完成注销及重启验证。
+- 备份代码、S4U/Password 任务和真实任务批次恢复均已完成；后续必须持续检查备份年龄，并完成注销及重启验证。
+- 影子预测任务已注册并返回0，但当前 `shadow_predictions=0`，尚未经历自然切点内的真实发布。首次发布前不能评价实时概率稳定性。
 - HTML 日期直播页按当前竞彩清单工作；清单切换后使用同源 Full 数据流补偿。前瞻任务和最多 7 天自动补偿仍必须用真实覆盖率验证，修复后取得的旧结果不能倒填为 24 小时成功。
 - 杯赛及赛事格式未知的比分默认自动隔离，不创建人工确认待办；项目负责人可按 D-028 主动声明现有候选口径，但不能手工补写比分。中国体彩 scope 浏览器证据已通过，但官方清单和 head API 当前被 EdgeOne 567 阻断；系统每日低频自动重试并保存失败证据，禁止代理、stealth、Cookie/Token 重放或验证码处理。首次完整官方成功前，官方来源子窗口不能起算。
 - 广泛赛事可能来源缺盘；必须与程序失败分开统计。
@@ -215,7 +232,7 @@
 
 ## Agent 唯一下一步
 
-观察2026-07-21 11:57 Asia/Shanghai 的下一次低频体彩官方补偿：若清单和head接口恢复，则核对完整分页、精确映射、双详情比分，并验证人工声明结果的一致或冲突处理；若仍为567，则保留新的失败批次并继续每日节流，不扩大访问频率。人工声明不计入自动赛果验收。同时继续7天技术验收、30天稳定性验收和严格样本积累；阿里云 ECS 保持所有 timer 禁用。
+观察 `FootballCups-Research-Shadow-Prediction` 的首个真实发布窗口：若自然切点内存在 live V2 合格欧赔快照，则确认只追加一条 research-only 影子预测并随后由研究 importer 入库；若无窗口则保持 `unchanged`。同时继续等待 2026-07-21 11:57 Asia/Shanghai 的低频体彩官方补偿，不扩大访问频率；阿里云 ECS 保持所有 timer 禁用。
 
 ## 恢复工作时首先执行
 

@@ -1,6 +1,6 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V2.1
+> 版本：V2.2
 > 更新日期：2026-07-20
 
 ## 1. 安装
@@ -65,7 +65,7 @@ py -3.11 -m venv .venv
 
 ## 3. 安装任务计划
 
-安装前确保虚拟环境、采集器和数据库 CLI 存在。提升的 PowerShell 中先预演，再原地注册三个 S4U 任务和一个专用非管理员数据库任务：
+安装前确保虚拟环境、采集器、数据库 CLI 和研究 CLI 存在。提升的 PowerShell 中先预演，再原地注册三个 S4U 任务和两个专用非管理员任务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.ps1 -WhatIf
@@ -76,9 +76,9 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\configure_database_task
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_backup_tasks.ps1 -Workspace .
 ```
 
-采集任务每 2 分钟运行，数据库每 5 分钟导入，每日 03:30 执行增量镜像，每周日 04:30 生成内容寻址批次。四个任务均禁止并行、允许唤醒并在失败后重试。采集和两个备份任务使用当前用户的 S4U；数据库任务必须使用专用非管理员 `football-cups-runner`，否则 PostgreSQL 会拒绝在重启后启动。
+采集任务每 2 分钟运行，数据库每 5 分钟导入，研究影子预测每 2 分钟运行，每日 03:30 执行增量镜像，每周日 04:30 生成内容寻址批次。五个任务均禁止并行、允许唤醒并在失败后重试。采集和两个备份任务使用当前用户的 S4U；数据库和影子预测任务必须使用专用非管理员 `football-cups-runner`，否则 PostgreSQL 可能拒绝在重启后启动。
 
-当前独立 Windows 主机拒绝为另一个本地标准账户注册 S4U。`configure_database_task_user.ps1` 因此在内存中生成随机密码，将账户加入内置 `Users`、授予工作区、数据目录和 `.venv` 基础 Python 的最小 ACL，并以 Task Scheduler `Password` 登录类型注册数据库任务。凭据由 Windows LSA 加密保存，不写入任务 XML、Git、日志或聊天；脚本再次运行会轮换密码并同步更新任务。S4U 通常不能访问需要交互凭据的网络共享，当前使用本机 G 盘。
+当前独立 Windows 主机拒绝为另一个本地标准账户注册 S4U。`configure_database_task_user.ps1` 因此在内存中生成随机密码，将账户加入内置 `Users`、授予工作区、数据目录和 `.venv` 基础 Python 的最小 ACL，并以 Task Scheduler `Password` 登录类型注册数据库任务和 `FootballCups-Research-Shadow-Prediction`。凭据由 Windows LSA 加密保存，不写入任务 XML、Git、日志或聊天；脚本再次运行会轮换密码并同步更新任务。S4U 通常不能访问需要交互凭据的网络共享，当前使用本机 G 盘。
 
 任务注册和专用账户配置需要提升的 PowerShell。非管理员会话可以仅为 24 小时验证安装显式回退任务：
 
@@ -88,12 +88,13 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 
 `-Interactive` 只在当前用户保持登录时运行，不能通过 30 天验收。正式连续运行前必须卸载回退任务，并在提升的 PowerShell 中重新安装默认无人值守模式。
 
-注册后逐项手工触发并轮询到 `Ready`，确认 `LastTaskResult=0` 和新的完成 manifest。随后记录任务 `LastRunTime`，注销用户至少 10 分钟；重新登录后确认采集至少两轮、数据库至少一轮且 `health=ok`。最终还需重启一次 Windows，确认 G 盘仍属于预期物理磁盘、PostgreSQL 可由导入任务启动且心跳在 10 分钟内恢复。
+注册后逐项手工触发并轮询到 `Ready`，确认 `LastTaskResult=0` 和新的完成 manifest。影子预测任务可能因尚未到真实发布窗口返回 `unchanged`，但不得失败。随后记录任务 `LastRunTime`，注销用户至少 10 分钟；重新登录后确认采集至少两轮、数据库至少一轮且 `health=ok`。最终还需重启一次 Windows，确认 G 盘仍属于预期物理磁盘、PostgreSQL 可由导入任务启动且心跳在 10 分钟内恢复。
 
 卸载：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.ps1 -Uninstall
+powershell -ExecutionPolicy Bypass -File scripts\windows\install_shadow_prediction_task.ps1 -Workspace . -Uninstall
 ```
 
 ## 4. 日常操作
@@ -151,7 +152,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_lo
   -OssBackupDir G:\football-cups-oss-layout
 ```
 
-`backup` 和 `backup-oss` 等待共享锁最多 300 秒。持锁阶段只固定清单、快照活动 JSONL 和 SQLite；复制及哈希在释放锁后进行。锁超时返回 1，配置错误返回 2，一致性、SQLite 或存储错误返回 3。因备份锁跳过的 `run-once` 保存 `RunnerSkip` manifest 并进入日报。
+`backup` 和 `backup-oss` 等待共享锁最多 300 秒。持锁阶段只固定清单、快照活动 JSONL 和 SQLite；复制及哈希在释放锁后进行。若存在 `data/research`，备份还会短暂取得 `research-facts.lock` 并以 `research/...` 前缀纳入同一批次。锁超时返回 1，配置错误返回 2，一致性、SQLite 或存储错误返回 3。因备份锁跳过的 `run-once` 保存 `RunnerSkip` manifest 并进入日报。
 
 手工运行与定时任务使用同一包装脚本：
 

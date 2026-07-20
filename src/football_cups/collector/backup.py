@@ -78,17 +78,32 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _iter_source_files(config: CollectorConfig) -> list[Path]:
-    files: list[Path] = []
+def _iter_source_files(config: CollectorConfig) -> list[tuple[Path, str]]:
+    files: list[tuple[Path, str]] = []
     for name in BACKUP_DIRS:
         root = config.data_dir / name
         if root.exists():
-            files.extend(path for path in sorted(root.rglob("*")) if path.is_file())
+            files.extend(
+                (path, path.relative_to(config.data_dir).as_posix())
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+            )
+    research_root = config.workspace / "data" / "research"
+    research_lock_path = research_root / "state" / "research-facts.lock"
+    if research_root.is_dir():
+        files.extend(
+            (path, (Path("research") / path.relative_to(research_root)).as_posix())
+            for path in sorted(research_root.rglob("*"))
+            if path.is_file() and path != research_lock_path
+        )
     return files
 
 
 def _is_mutable_normalized(path: Path, config: CollectorConfig, at: datetime) -> bool:
-    relative = path.relative_to(config.data_dir)
+    try:
+        relative = path.relative_to(config.data_dir)
+    except ValueError:
+        return False
     current = Path("normalized") / at.strftime("%Y") / at.strftime("%m") / at.strftime("%d")
     return relative == current or current in relative.parents
 
@@ -121,12 +136,25 @@ def _create_snapshot(config: CollectorConfig, *, now: datetime | None = None) ->
         raise BackupLockTimeout(
             f"collector lock was not available within {config.backup_lock_wait_seconds} seconds"
         )
+    research_lock_path = config.workspace / "data" / "research" / "state" / "research-facts.lock"
+    research_lock = SingleInstanceLock(research_lock_path)
+    research_lock_acquired = False
+    if research_lock_path.parent.is_dir():
+        research_lock_acquired = research_lock.acquire(
+            wait_seconds=config.backup_lock_wait_seconds,
+            poll_seconds=config.backup_lock_poll_seconds,
+        )
+        if not research_lock_acquired:
+            lock.release()
+            shutil.rmtree(staging_root, ignore_errors=True)
+            raise BackupLockTimeout(
+                f"research facts lock was not available within {config.backup_lock_wait_seconds} seconds"
+            )
 
     files: list[SnapshotFile] = []
     try:
         snapshot_reference = now or utc_now()
-        for source in _iter_source_files(config):
-            relative = source.relative_to(config.data_dir).as_posix()
+        for source, relative in _iter_source_files(config):
             staged = _is_mutable_normalized(source, config, snapshot_reference)
             selected = source
             if staged:
@@ -178,6 +206,8 @@ def _create_snapshot(config: CollectorConfig, *, now: datetime | None = None) ->
         shutil.rmtree(staging_root, ignore_errors=True)
         raise
     finally:
+        if research_lock_acquired:
+            research_lock.release()
         lock.release()
 
 

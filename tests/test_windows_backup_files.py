@@ -39,6 +39,19 @@ def test_database_task_supports_a_dedicated_non_admin_password_user() -> None:
     assert "RandomNumberGenerator" in configurator
     assert "-PasswordLogon `" in configurator
     assert "FileSystemAccessRule" in configurator
+    assert "install_shadow_prediction_task.ps1" in configurator
+    assert "FootballCups-Research-Shadow-Prediction" in configurator
+
+
+def test_shadow_prediction_task_has_independent_two_minute_schedule() -> None:
+    installer = (WINDOWS / "install_shadow_prediction_task.ps1").read_text(encoding="utf-8")
+    runner = (WINDOWS / "run_shadow_prediction.ps1").read_text(encoding="utf-8")
+    assert "FootballCups-Research-Shadow-Prediction" in installer
+    assert "-RepetitionInterval (New-TimeSpan -Minutes 2)" in installer
+    assert "-MultipleInstances IgnoreNew" in installer
+    assert "-UserId $UserId -LogonType $logonType -RunLevel Limited" in installer
+    assert "shadow-predict" in runner
+    assert "db-import" in runner
 
 
 def test_backup_configuration_preserves_other_environment_lines() -> None:
@@ -66,6 +79,8 @@ def test_windows_backup_scripts_parse() -> None:
         "install_backup_tasks.ps1",
         "configure_database_task_user.ps1",
         "install_database_import_task.ps1",
+        "install_shadow_prediction_task.ps1",
+        "run_shadow_prediction.ps1",
     ):
         path = WINDOWS / name
         command = (

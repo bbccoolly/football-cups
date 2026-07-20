@@ -4,9 +4,11 @@ import hashlib
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
+from football_cups.collector.storage import SingleInstanceLock
 from .config import ResearchConfig
 
 
@@ -17,6 +19,17 @@ def json_dumps(value: Any, *, indent: int | None = None) -> str:
 def stable_id(kind: str, *parts: object) -> str:
     value = "|".join([kind, *(str(part) for part in parts)])
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@contextmanager
+def research_facts_lock(config: ResearchConfig, *, wait_seconds: float = 0) -> Iterator[None]:
+    lock = SingleInstanceLock(config.lock_path)
+    if not lock.acquire(wait_seconds=wait_seconds, poll_seconds=5):
+        raise TimeoutError(f"research facts lock is busy: {config.lock_path}")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 class ResearchStore:

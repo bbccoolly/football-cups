@@ -14,6 +14,11 @@ from football_cups.research import RESEARCH_FLAGS
 from football_cups.research.config import ResearchConfig
 from football_cups.research.database import import_research_files
 from football_cups.research.http import AccessPolicyError, BudgetExceeded, ResearchHttpClient
+from football_cups.research.modeling import (
+    build_closing_1x2_dataset,
+    train_devig_consensus_model,
+    write_model_dataset,
+)
 from football_cups.research.normalize import (
     ResearchIntegrityError,
     import_k1_dataset,
@@ -21,7 +26,7 @@ from football_cups.research.normalize import (
     normalize_world_cup_xlsx,
 )
 from football_cups.research.registry import ASSETS, ResearchAsset
-from football_cups.research.reporting import _competition_label, _metric_rows
+from football_cups.research.reporting import _competition_label, _metric_rows, load_records
 from football_cups.research.state import ResearchState
 from football_cups.research.storage import ResearchStore
 
@@ -278,6 +283,79 @@ def research_record(record_type: str, record_id: str, **values) -> dict:
         **RESEARCH_FLAGS,
         **values,
     }
+
+
+def _market_fixture_records() -> list[dict]:
+    asset = next(asset for asset in ASSETS if asset.asset_id == "football-data-2526-e0")
+    asset_record = source_asset(asset)
+    fixture = research_record(
+        "ResearchFixture",
+        "fixture-with-consensus",
+        source_id="football-data",
+        source_asset_record_id=asset_record["record_id"],
+        source_fixture_key="fixture-1",
+        competition="Premier League",
+        match_date="2025-08-15",
+        home_team="Home",
+        away_team="Away",
+        home_goals=2,
+        away_goals=1,
+        result_scope="regular_time_90",
+        result_eligible=True,
+        source_payload={},
+    )
+    markets = [
+        research_record(
+            "ResearchMarketObservation",
+            f"market-{bookmaker}",
+            fixture_record_id=fixture["record_id"],
+            source_id="football-data",
+            asset_sha256=asset_record["sha256"],
+            cohort="closing",
+            market="1x2",
+            bookmaker=bookmaker,
+            line=None,
+            values={"home": home, "draw": draw, "away": away},
+            market_contract="core3_available",
+        )
+        for bookmaker, home, draw, away in (
+            ("B365", 2.0, 3.5, 4.0),
+            ("BW", 2.1, 3.4, 3.9),
+            ("IW", 1.95, 3.6, 4.2),
+            ("Avg", 2.0, 3.5, 4.0),
+        )
+    ]
+    return [asset_record, fixture, *markets]
+
+
+def test_model_dataset_uses_three_real_closing_bookmakers(tmp_path: Path) -> None:
+    cfg = config(tmp_path)
+    store = ResearchStore(cfg)
+    store.write_records("football-data", "run", "records", _market_fixture_records())
+    points, _ = build_closing_1x2_dataset(cfg)
+    assert len(points) == 1
+    assert points[0].bookmaker_count == 3
+    assert points[0].bookmakers == ("B365", "BW", "IW")
+    result = write_model_dataset(
+        cfg,
+        training_before_date=date(2026, 1, 1),
+        now=datetime(2026, 7, 20, tzinfo=UTC),
+    )
+    assert result["status"] == "created"
+    model = train_devig_consensus_model(
+        cfg,
+        training_before_date=date(2026, 1, 1),
+        activate=True,
+        channel="research-shadow-v1",
+        now=datetime(2026, 7, 20, 1, tzinfo=UTC),
+    )
+    assert model["model_version"].startswith("devig-consensus-v1-")
+    records = load_records(cfg)
+    activation = next(
+        record for record in records.values() if record["record_type"] == "ResearchModelActivation"
+    )
+    assert activation["research_kind"] == "model_artifact"
+    assert activation["backfill"] is True
 
 
 def test_research_postgres_import_is_isolated(tmp_path: Path) -> None:
