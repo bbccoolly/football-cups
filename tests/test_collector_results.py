@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -273,6 +273,65 @@ def test_service_uses_analysis_pair_fallback_when_live_sources_omit_fixture(
     assert counts["verified"] == 1
     assert len(list((config.data_dir / "results").rglob("candidates/*.json"))) == 1
     assert len(list((config.data_dir / "results").rglob("verified/*.json"))) == 1
+
+
+def test_fixture_invalidation_is_append_only_idempotent_and_stops_jobs(tmp_path) -> None:
+    config = config_for(tmp_path)
+    now = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    identity = {
+        "fixture_id": "123",
+        "competition_name": "League",
+        "competition_id": "16",
+        "home_team_id": "1",
+        "away_team_id": "2",
+        "kickoff_at": iso_utc(now),
+        "buy_end_at": None,
+    }
+    with CollectorService(config) as service:
+        service.state.upsert_fixture(identity, now, identity_conflict=False)
+        service.state.schedule_fixture(identity, now, is_new=True)
+        first = service.invalidate_fixture(
+            "123",
+            reason="invalid_match",
+            source_url="https://source.test/results",
+            note="operator confirmed",
+        )
+        second = service.invalidate_fixture("123", reason="invalid_match")
+        pending = service.state.connection.execute(
+            "SELECT count(*) FROM jobs WHERE fixture_id='123' AND status='pending'"
+        ).fetchone()[0]
+        reconciled = service.reconcile_results(
+            now - timedelta(hours=1), now + timedelta(hours=1)
+        )
+
+    assert first["status"] == "invalidated"
+    assert first["cancelled_pending_jobs"] > 0
+    assert second["status"] == "unchanged"
+    assert pending == 0
+    assert reconciled["fixtures_queued"] == 0
+    records = []
+    for path in (config.data_dir / "normalized").rglob("*.jsonl"):
+        records.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+    invalidations = [row for row in records if row.get("event_type") == "fixture_invalidated"]
+    assert len(invalidations) == 1
+    assert invalidations[0]["status"] == "excluded"
+
+
+def test_new_fixture_invalidation_requires_source_evidence(tmp_path) -> None:
+    config = config_for(tmp_path)
+    now = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    identity = {
+        "fixture_id": "123",
+        "competition_name": "League",
+        "competition_id": "16",
+        "home_team_id": "1",
+        "away_team_id": "2",
+        "kickoff_at": iso_utc(now),
+    }
+    with CollectorService(config) as service:
+        service.state.upsert_fixture(identity, now, identity_conflict=False)
+        with pytest.raises(ValueError, match="source_url is required"):
+            service.invalidate_fixture("123", reason="invalid_match")
 
 
 def test_manual_verified_result_conflict_is_not_overwritten(tmp_path) -> None:

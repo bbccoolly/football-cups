@@ -64,6 +64,16 @@ def database_status(connection: Connection) -> dict[str, Any]:
     current_verified = connection.execute(
         "SELECT count(*) AS count FROM football.current_verified_results"
     ).fetchone()
+    invalid_fixtures = 0
+    invalid_relation = connection.execute(
+        "SELECT to_regclass('football.current_invalid_fixtures') AS name"
+    ).fetchone()
+    if invalid_relation and invalid_relation["name"] is not None:
+        invalid_fixtures = int(
+            connection.execute(
+                "SELECT count(*) AS count FROM football.current_invalid_fixtures"
+            ).fetchone()["count"]
+        )
     strict_results_by_cutoff = {
         str(row["target"]): int(row["count"])
         for row in connection.execute(
@@ -91,6 +101,7 @@ def database_status(connection: Connection) -> dict[str, Any]:
         "checkpoints": dict(checkpoint),
         "unsupported_records": int(unsupported["count"]),
         "current_verified_results": int(current_verified["count"]),
+        "current_invalid_fixtures": invalid_fixtures,
         "strict_fixture_results_by_cutoff": strict_results_by_cutoff,
         "model_eligible_snapshots_by_cutoff": model_eligible_by_cutoff,
         "latest_import_run": dict(latest_run) if latest_run else None,

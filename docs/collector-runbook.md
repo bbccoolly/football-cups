@@ -183,3 +183,16 @@ strict_fixture_result_count_by_cutoff
 ```
 
 `T+24h` 后仍缺少候选或一致性证据时，采集器每日补偿至 `T+7d`。`reconcile-results` 可立即重查历史缺口，但新证据使用真实观察时间，不能倒填。`verify-results` 仅为旧接口兼容，不属于正式操作流程。
+
+人工核验确认场次无效、取消或未结算时，保留证据 URL 并执行：
+
+```powershell
+.\.venv\Scripts\football-cups-collector.exe invalidate-fixture `
+  --workspace . `
+  --fixture-id <id> `
+  --reason invalid_match `
+  --source-url <evidence-url> `
+  --note <audit-note>
+```
+
+命令只做追加式逻辑排除并取消待执行任务。执行后运行数据库导入和日报，确认 `current_invalid_fixtures` 包含该 fixture、赛果分母已剥离；不得删除任何事实文件或人工补写比分。

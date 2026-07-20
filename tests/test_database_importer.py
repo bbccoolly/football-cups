@@ -393,6 +393,30 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             "SELECT count(*) AS count FROM football.current_verified_results"
         ).fetchone()
         assert current_verified["count"] == 1
+        assert apply_migrations(connection, target_version="008") == ["008"]
+        assert insert_record(
+            connection,
+            base_record(
+                "QualityEvent",
+                record_id="fixture-invalidated",
+                occurred_at="2026-07-16T14:30:00Z",
+                event_type="fixture_invalidated",
+                status="excluded",
+                details={"reason": "invalid_match"},
+            ),
+            source_file="normalized/test-invalidation.jsonl",
+            source_line=1,
+        )
+        connection.commit()
+        invalid_views = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM football.current_invalid_fixtures) AS invalid,
+                (SELECT count(*) FROM football.current_verified_results) AS verified,
+                (SELECT count(*) FROM football.current_model_eligible_snapshot_batches) AS batches
+            """
+        ).fetchone()
+        assert invalid_views == {"invalid": 1, "verified": 0, "batches": 0}
         assert insert_record(
             connection,
             base_record(

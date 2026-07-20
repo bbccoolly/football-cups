@@ -254,6 +254,8 @@ class StateStore:
         if not kickoff_text:
             return
         fixture_id = str(identity["fixture_id"])
+        if self.is_fixture_invalidated(fixture_id):
+            return
         kickoff = parse_iso(kickoff_text)
         version = kickoff.strftime("%Y%m%dT%H%M%SZ")
         if is_new and kickoff > observed_at:
@@ -295,6 +297,8 @@ class StateStore:
         if not kickoff_text:
             return
         fixture_id = str(identity["fixture_id"])
+        if self.is_fixture_invalidated(fixture_id):
+            return
         kickoff = parse_iso(kickoff_text)
         version = kickoff.strftime("%Y%m%dT%H%M%SZ")
         targets = [(f"T+{hours}h", hours, 40) for hours in (3, 6, 24)]
@@ -322,6 +326,23 @@ class StateStore:
             self._schedule_result_jobs(fixture["identity"], now)
         self.connection.commit()
         return self.connection.total_changes - before
+
+    def is_fixture_invalidated(self, fixture_id: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM events WHERE fixture_id=? "
+            "AND event_type='fixture_invalidated' AND status='excluded' LIMIT 1",
+            (str(fixture_id),),
+        ).fetchone()
+        return row is not None
+
+    def invalidate_fixture_jobs(self, fixture_id: str, now: datetime) -> int:
+        cursor = self.connection.execute(
+            "UPDATE jobs SET status='not_needed', updated_at=? "
+            "WHERE fixture_id=? AND status='pending'",
+            (iso_utc(now), str(fixture_id)),
+        )
+        self.connection.commit()
+        return cursor.rowcount
 
     def sync_competition_formats(self, formats: dict[str, str]) -> int:
         changed = 0

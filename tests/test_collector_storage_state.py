@@ -175,11 +175,26 @@ def test_state_rebuild_uses_discovery_file_facts(tmp_path) -> None:
     }
     store.write_result("candidates", candidate, now + timedelta(days=3))
     store.write_result("verified", verified, now + timedelta(days=3, hours=1))
+    store.append_normalized(
+        "quality_events",
+        {
+            "record_id": "invalid-123",
+            "record_type": "QualityEvent",
+            "event_type": "fixture_invalidated",
+            "status": "excluded",
+            "fixture_id": "123",
+            "competition": "League",
+            "occurred_at": iso_utc(now + timedelta(days=4)),
+            "details": {"reason": "invalid_match"},
+        },
+        now + timedelta(days=4),
+    )
     with StateStore(config):
         pass
     result = rebuild_state(config)
     assert result["manifests_processed"] == 1
     assert result["fixtures_rebuilt"] == 1
+    assert result["fixture_invalidations_rebuilt"] == 1
     assert result["previous_state_backup"] is not None
     with StateStore(config) as state:
         assert state.all_fixtures()[0]["fixture_id"] == "123"
@@ -189,7 +204,10 @@ def test_state_rebuild_uses_discovery_file_facts(tmp_path) -> None:
                 "SELECT event_type FROM events WHERE fixture_id='123'"
             )
         }
-        assert {"result_candidate", "verified_result"}.issubset(event_types)
+        assert {"result_candidate", "verified_result", "fixture_invalidated"}.issubset(
+            event_types
+        )
+        assert state.is_fixture_invalidated("123")
 
 
 def test_oss_backup_requires_complete_marker_and_restores_hashes(tmp_path) -> None:

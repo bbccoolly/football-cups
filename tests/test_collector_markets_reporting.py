@@ -309,6 +309,36 @@ def test_result_metrics_count_unique_fixtures_and_24h_deadlines(tmp_path) -> Non
     assert metrics["strict_fixture_result_count_by_cutoff"] == {"T-60m": 1}
 
 
+def test_invalidated_fixture_is_excluded_from_result_denominator(tmp_path) -> None:
+    config = config_for(tmp_path)
+    start = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    kickoff = start - timedelta(hours=12)
+    identity = {
+        "fixture_id": "101",
+        "competition_name": "League",
+        "competition_id": "1",
+        "home_team_id": "h1",
+        "away_team_id": "a1",
+        "kickoff_at": iso_utc(kickoff),
+        "buy_end_at": None,
+    }
+    with StateStore(config) as state:
+        state.upsert_fixture(identity, kickoff - timedelta(days=1), identity_conflict=False)
+        state.add_event(
+            "fixture_invalidated",
+            "excluded",
+            {"reason": "invalid_match"},
+            occurred_at=start,
+            fixture_id="101",
+        )
+        report = build_window_report(config, state, start, end, generated_at=end)
+
+    metrics = report["metrics"]
+    assert metrics["result_fixture_denominator"] == 0
+    assert metrics["result_cancelled_count"] == 1
+
+
 def test_result_conflict_removes_fixture_from_verified_coverage(tmp_path) -> None:
     config = config_for(tmp_path)
     start = datetime(2026, 7, 17, tzinfo=timezone.utc)

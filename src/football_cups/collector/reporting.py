@@ -75,7 +75,7 @@ def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[s
             f"SELECT fixture_id, event_type, status, occurred_at, cutoff, details_json FROM events "
             f"WHERE fixture_id IN ({placeholders}) AND occurred_at<? "
             "AND event_type IN ('result_candidate','verified_result','result_unresolved',"
-            "'result_conflict','result_scope_ambiguous','result_cancelled')",
+            "'result_conflict','result_scope_ambiguous','result_cancelled','fixture_invalidated')",
             [*sorted(fixture_ids), iso_utc(end)],
         ).fetchall()
         for row in rows:
@@ -101,7 +101,7 @@ def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[s
                 conflict_ids.add(fixture_id)
             elif event_type == "result_scope_ambiguous":
                 ambiguous_ids.add(fixture_id)
-            elif event_type == "result_cancelled":
+            elif event_type in {"result_cancelled", "fixture_invalidated"}:
                 cancelled_ids.add(fixture_id)
     eligible_fixture_ids = fixture_ids - cancelled_ids
     candidate_within_24h = {

@@ -67,6 +67,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "reconcile-results",
         "audit-market-data",
         "reparse-markets",
+        "invalidate-fixture",
     ):
         subparser = subparsers.add_parser(name)
         add_workspace_argument(subparser)
@@ -91,6 +92,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             mode = subparser.add_mutually_exclusive_group(required=True)
             mode.add_argument("--dry-run", action="store_true")
             mode.add_argument("--apply", action="store_true")
+        if name == "invalidate-fixture":
+            subparser.add_argument("--fixture-id", required=True)
+            subparser.add_argument("--reason", required=True)
+            subparser.add_argument("--source-url", required=True)
+            subparser.add_argument("--note")
     verify = subparsers.add_parser("verify-results")
     add_workspace_argument(verify)
     verify.add_argument("--input", type=Path, required=True)
@@ -466,6 +472,19 @@ def main(argv: list[str] | None = None) -> int:
                 result = service.reconcile_results(start, end)
                 print(json_dumps(result, indent=2))
                 return 0 if not result["counts"].get("failure") else 1
+            if args.command == "invalidate-fixture":
+                try:
+                    result = service.invalidate_fixture(
+                        args.fixture_id,
+                        reason=args.reason,
+                        source_url=args.source_url,
+                        note=args.note,
+                    )
+                except ValueError as exc:
+                    print(json_dumps({"status": "invalid", "error": str(exc)}, indent=2))
+                    return 2
+                print(json_dumps(result, indent=2))
+                return 0
             if args.command == "report-daily":
                 local_today = datetime.now(ZoneInfo(config.timezone_name)).date()
                 report_day = date.fromisoformat(args.date) if args.date else local_today

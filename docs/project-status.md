@@ -73,6 +73,8 @@
 - [x] 完成首个实时 V2 正式切点：fixture `1362048` 的 `T-12h` 三核心市场均接受，完整 bookmaker 为53/16/16，模型严格资格为 true。
 - [x] 记录 D-024，赛事格式登记增加稳定 `competition_id` fallback，并在直播源遗漏 fixture 时使用 `shuju` 与 `ouzhi` 分析双端点一致比分补偿普通联赛赛果。
 - [x] 完成 2026-07-15 至 2026-07-20 赛果补偿：新增 15 条候选和 14 条已验证赛果；`ResultCandidate=54`、`VerifiedResult=34`、`current_verified_results=34`、`unsupported_records=0`。
+- [x] 记录 D-025，将 fixture `1358414` 按中国体彩人工核验证据追加标记为无效场次；取消4个待执行赛果任务，保留全部事实并从覆盖分母、模型资格和阶段门禁中排除。
+- [x] 无效场次改动通过107项全量离线测试；迁移008已在主库应用，幂等复查返回 `unchanged`，`health=ok` 且采集与数据库任务继续正常运行。
 
 ## 当前目标
 
@@ -82,14 +84,14 @@
 
 ## 当前运行证据
 
-截至 2026-07-20 09:42 Asia/Shanghai：
+截至 2026-07-20 10:01 Asia/Shanghai：
 
 - 本地增强 `health=ok`：最后心跳年龄约 28 秒，完整发现年龄约 22 分钟，SQLite `quick_check=ok`，0 个逾期任务，64 个未来待办；每日和每周 G 盘备份均为 `ok`。
-- 数据库导入检查点为 60 个文件、179,178 行；主库 `records=179,178`、`collection_manifests=612`、`quality_events=10,643`、`ResultCandidate=54`、`VerifiedResult=34`、`unsupported_records=0`。
-- 开球超过 24 小时的 36 场中，28 场已有唯一有效已验证赛果，1 场仍缺候选，7 场有候选但因欧战/世界杯口径可能包含加时继续自动隔离。
+- 数据库导入检查点为 60 个文件、179,369 行；主库 `records=179,369`、`collection_manifests=613`、`quality_events=10,666`、`ResultCandidate=54`、`VerifiedResult=34`、`current_invalid_fixtures=1`、`unsupported_records=0`。
+- 开球超过 24 小时的原36场中，fixture `1358414` 已作为无效场次剥离；剩余35场有效分母中28场已有唯一有效已验证赛果，7场有候选但因欧战/世界杯口径可能包含加时继续自动隔离，不再存在完全缺候选的有效场次。
 - 赛果补偿过程无 HTTP 程序失败、无比分冲突。新增验证方法分布为：`500-two-page-regular-time-competition=30`，`500-analysis-pair-regular-time-competition=4`。
 - 阶段 4 严格快照加已验证赛果计数：`T-24h=23`、`T-12h=25`、`T-6h=33`、`T-60m=33`、`T-10m=33`；距离各切点 500 场门槛仍很远。
-- 当前唯一缺候选 fixture 为 `1358414`。2026-07-20 09:38 Asia/Shanghai 再次执行全窗口自动补偿，日期直播页、Full 数据流、`shuju` 和 `ouzhi` 四个端点均 HTTP 200，但直播源未列出该 fixture，两个分析页仍显示 `VS`；本轮形成 1 条可审计 `missing` 质量事件，候选和已验证赛果均无新增。
+- fixture `1358414` 在四个500端点持续缺失或显示 `VS`，后经项目负责人在中国体彩竞彩足球赛果页核验为无效场次。10:00 Asia/Shanghai 执行幂等 `invalidate-fixture`，追加1条 `fixture_invalidated/excluded` 证据并取消4个待执行任务；重复执行返回 `unchanged`。
 - 中国体育彩票 `getMatchResultV1.qry` 赛果接口经命令行和真实浏览器核验均被站点 WAF/EdgeOne 拦截，不能作为当前稳定自动证据源；在能够保存原始响应、稳定匹配 fixture 并证明 90 分钟口径前，不接入正式赛果闭环。
 
 截至 2026-07-17 18:02 Asia/Shanghai 的盘口 V2 上线证据：
@@ -168,7 +170,7 @@
 - 盘口 V2 的7天技术子窗口和30天切点资格子窗口从2026-07-17 17:56:56重新计时；最早分别于2026-07-24和2026-08-16同一时刻评估。
 - 本地 PostgreSQL 使用 trust 认证且仅绑定回环地址；不得转发或暴露端口。
 - PostgreSQL 程序和主/测试/重放数据库当前约占 D 盘 1.05 GB；数据库可重建，但文件事实层仍必须异盘备份。
-- 当前有 34 场具有唯一有效赛果；V2 模型合格批次与赛果交集仍远低于“同切点模型严格快照+唯一赛果”的 500 场门禁。
+- 当前有34场具有唯一有效赛果、1场无效 fixture 被逻辑排除；V2 模型合格批次与赛果交集仍远低于“同切点模型严格快照+唯一赛果”的500场门禁。
 - 本地 Windows 长期运行需要人工保证联网、不休眠和系统时间准确。
 - 采集和两个备份 S4U 任务、真实备份批次恢复、专用非管理员数据库任务自动启动及 Windows 重启恢复均已通过；注销 10 分钟完成前，30 天无人值守门禁保持未通过。
 - 本地 `FOOTBALL_CUPS_OSS_BACKUP_DIR` 和内容寻址恢复已完成；私有阿里云 OSS 的真实上传下载仍暂停并继续阻止云端正式切换。
@@ -199,7 +201,7 @@
 
 ## Agent 唯一下一步
 
-继续观察 7 天技术验收、30 天稳定性验收和赛果覆盖率；每日检查 `result_candidate_coverage_24h`，重点跟踪 fixture `1358414` 是否从 `VS` 变为可解析比分。期间继续每日 3 场人工核验，并完成注销 Windows 用户至少 10 分钟的无人值守验证。阿里云 ECS 保持所有 timer 禁用。
+继续观察7天技术验收、30天稳定性验收和赛果覆盖率；每日检查 `result_candidate_coverage_24h` 和无效场次分类。期间继续每日3场人工核验，并完成注销 Windows 用户至少10分钟的无人值守验证。阿里云 ECS 保持所有 timer 禁用。
 
 ## 恢复工作时首先执行
 

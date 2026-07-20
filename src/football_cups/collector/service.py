@@ -113,6 +113,60 @@ class CollectorService:
             self.data.append_normalized("quality_events", record, occurred)
         return record
 
+    def invalidate_fixture(
+        self,
+        fixture_id: str,
+        *,
+        reason: str,
+        source_url: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        fixture_id = str(fixture_id).strip()
+        reason = reason.strip()
+        if not fixture_id or not reason:
+            raise ValueError("fixture_id and reason are required")
+        fixture = self.state.fixtures_by_ids({fixture_id}).get(fixture_id)
+        if fixture is None:
+            raise ValueError(f"unknown fixture_id: {fixture_id}")
+        if self.state.is_fixture_invalidated(fixture_id):
+            return {
+                "status": "unchanged",
+                "fixture_id": fixture_id,
+                "reason": "fixture is already invalidated",
+            }
+        if not source_url or not source_url.strip():
+            raise ValueError("source_url is required for a new fixture invalidation")
+
+        occurred_at = utc_now()
+        details = {
+            "reason": reason,
+            "source_url": source_url,
+            "note": note,
+            "evidence_source": "project_owner_manual_check",
+            "exclusion_scope": [
+                "result_denominator",
+                "model_eligibility",
+                "training",
+                "backtest",
+                "phase_gate",
+            ],
+        }
+        record = self.emit_quality(
+            "fixture_invalidated",
+            "excluded",
+            details,
+            at=occurred_at,
+            fixture_id=fixture_id,
+            competition=str(fixture.get("competition") or "") or None,
+        )
+        cancelled_jobs = self.state.invalidate_fixture_jobs(fixture_id, occurred_at)
+        return {
+            "status": "invalidated",
+            "fixture_id": fixture_id,
+            "cancelled_pending_jobs": cancelled_jobs,
+            "record": record,
+        }
+
     def _observe_http(
         self, blob: dict[str, Any], *, context: str, content_valid: bool = True
     ) -> bool:
@@ -1117,6 +1171,8 @@ class CollectorService:
             if not (start <= kickoff < end) or kickoff > requested_at:
                 continue
             fixture_id = str(fixture["fixture_id"])
+            if self.state.is_fixture_invalidated(fixture_id):
+                continue
             if fixture_id in verified_ids:
                 continue
             if fixture_id in passed_candidates and fixture.get("competition_format") != "regular_time_only":
@@ -1358,11 +1414,46 @@ def rebuild_state(config: CollectorConfig) -> dict[str, Any]:
                 fixture_id=fixture_id,
                 cutoff="rebuilt",
             )
+        invalidations = 0
+        for path in sorted((config.data_dir / "normalized").rglob("*.jsonl")):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    record.get("record_type") != "QualityEvent"
+                    or record.get("event_type") != "fixture_invalidated"
+                    or record.get("status") != "excluded"
+                ):
+                    continue
+                try:
+                    occurred = parse_iso(str(record["occurred_at"]))
+                    fixture_id = str(record["fixture_id"])
+                    details = dict(record.get("details") or {})
+                except (KeyError, TypeError, ValueError):
+                    continue
+                rebuilt.add_event(
+                    "fixture_invalidated",
+                    "excluded",
+                    details,
+                    occurred_at=occurred,
+                    fixture_id=fixture_id,
+                    competition=record.get("competition"),
+                )
+                rebuilt.claim_record(str(record["record_id"]), "QualityEvent", occurred)
+                rebuilt.invalidate_fixture_jobs(fixture_id, occurred)
+                invalidations += 1
         rebuilt.set_meta("state_rebuilt_at", iso_utc(utc_now()))
     finally:
         rebuilt.close()
     return {
         "manifests_processed": processed,
         "fixtures_rebuilt": fixtures,
+        "fixture_invalidations_rebuilt": invalidations,
         "previous_state_backup": str(backup_path) if backup_path else None,
     }
