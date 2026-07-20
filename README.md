@@ -42,6 +42,14 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\football-cups-collector.exe audit-market-data --workspace .
 ```
 
+人工从权威来源确认无效、取消或未结算场次时，只追加逻辑排除证据，不删除事实文件或补写比分：
+
+```powershell
+.\.venv\Scripts\football-cups-collector.exe invalidate-fixture `
+  --workspace . --fixture-id <id> --reason invalid_match `
+  --source-url <evidence-url> --note <audit-note>
+```
+
 当前采集器读取的配置项和默认值见 `.env.example`，完整命令、任务计划、备份与恢复步骤见 `docs/collector-runbook.md`。本地默认运行数据写入被 Git 忽略的 `data/500/`。长时间中断后先按 `AGENTS.md` 恢复，不依赖聊天历史。
 
 迁移到阿里云前必须先完成精确窗口报告、备份恢复和云端 smoke test，步骤见 `docs/cloud-migration-plan.md`。

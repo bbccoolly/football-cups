@@ -84,10 +84,11 @@
 
 ## 当前运行证据
 
-截至 2026-07-20 10:01 Asia/Shanghai：
+截至 2026-07-20 10:13:17 Asia/Shanghai：
 
-- 本地增强 `health=ok`：最后心跳年龄约 28 秒，完整发现年龄约 22 分钟，SQLite `quick_check=ok`，0 个逾期任务，64 个未来待办；每日和每周 G 盘备份均为 `ok`。
-- 数据库导入检查点为 60 个文件、179,369 行；主库 `records=179,369`、`collection_manifests=613`、`quality_events=10,666`、`ResultCandidate=54`、`VerifiedResult=34`、`current_invalid_fixtures=1`、`unsupported_records=0`。
+- 本地增强 `health=ok`：最后心跳年龄约15秒，完整发现年龄约22分钟，SQLite `quick_check=ok`，0个逾期任务，60个未来待办；每日和每周G盘备份均为 `ok`。
+- 当日日报运行326次且全部成功；完整发现成功率100%，HTTP成功率100%，解析成功率100%，24小时候选赛果覆盖率100%，已验证赛果覆盖率88.8889%，未解决赛果0，赛果冲突0。
+- 数据库导入检查点为60个文件、179,374行；主库 `records=179,374`、`collection_manifests=613`、`quality_events=10,671`、`ResultCandidate=54`、`VerifiedResult=34`、`current_invalid_fixtures=1`、`unsupported_records=0`。
 - 开球超过 24 小时的原36场中，fixture `1358414` 已作为无效场次剥离；剩余35场有效分母中28场已有唯一有效已验证赛果，7场有候选但因欧战/世界杯口径可能包含加时继续自动隔离，不再存在完全缺候选的有效场次。
 - 赛果补偿过程无 HTTP 程序失败、无比分冲突。新增验证方法分布为：`500-two-page-regular-time-competition=30`，`500-analysis-pair-regular-time-competition=4`。
 - 阶段 4 严格快照加已验证赛果计数：`T-24h=23`、`T-12h=25`、`T-6h=33`、`T-60m=33`、`T-10m=33`；距离各切点 500 场门槛仍很远。
@@ -128,7 +129,7 @@
 截至 2026-07-17 13:32 Asia/Shanghai：
 
 - 本地增强 `health` 返回 `ok`：SQLite `quick_check=ok`，最后心跳年龄约 75 秒，完整发现和时钟校验年龄约 16 分钟，0 个逾期任务，180 个未来待办，磁盘状态正常。
-- 赛果修复部署期间两个 Windows 任务已暂停并完成 SQLite 在线备份；2026-07-17 10:44:44 Asia/Shanghai 恢复并手工触发后持续返回 `0`，采集和数据库导入任务最近一次 10:58:58 自动运行均为 `0`。正式 30 天赛果窗口从 10:44:44 计时。
+- 赛果修复部署期间两个 Windows 任务已暂停并完成 SQLite 在线备份；2026-07-17 10:44:44 Asia/Shanghai 恢复并手工触发后持续返回 `0`，采集和数据库导入任务在10:58:58自动运行均为 `0`。正式30天赛果窗口从10:44:44计时。
 - 2026-07-17 自然日日报：运行 299 次，完整发现成功率 100%，HTTP 成功率 89.2308%，解析成功率 100%，候选赛果覆盖率 0%。
 - 2026-07-15 19:11 至 2026-07-16 19:11 Asia/Shanghai 的首个 24 小时发现验证窗口：运行 765 次，完整发现成功率 100%，HTTP 成功率 96.1983%，解析成功率 100%；其中 `runner:partial=3`、`snapshot_batch:partial=3`、`source_http_date_stale:warning=82`，均需继续跟踪但不推翻发现子系统 24 小时结论。
 - 从 2026-07-16 19:11 Asia/Shanghai 到 2026-07-17 09:21 Asia/Shanghai 的进行中窗口报告：运行 452 次，完整发现成功率 100%，HTTP 成功率 89.6721%，解析成功率 100%，候选赛果覆盖率 0%。

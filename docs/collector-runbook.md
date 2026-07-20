@@ -1,6 +1,6 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V1.8
+> 版本：V1.9
 > 更新日期：2026-07-20
 
 ## 1. 安装
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 
 `run-once` 会在跨日后自动生成上一自然日的日报。备份任务把每次运行写入 `data/500/logs/backup-task.jsonl`；任务返回 0 仍须同时存在新的完成 manifest。每月应从真实定时批次完成一次恢复。
 
-`health` 可能返回 `ok`、`warning` 或 `failed`，退出码分别为 0、1、3。除心跳、发现、时钟、SQLite、磁盘和挂载点外，还报告 `backup_status`、`oss_backup_status`、最近完成时间和 G 盘剩余空间。每日备份超过 26 小时或每周备份超过 8 天为警告，分别超过 48 小时或 15 天为失败。
+`health` 可能返回 `ok`、`warning` 或 `failed`，退出码分别为 0、1、3。除心跳、发现、时钟、SQLite、磁盘和挂载点外，还报告 `backup_status`、`oss_backup_status`、最后完成时间和 G 盘剩余空间。每日备份超过 26 小时或每周备份超过 8 天为警告，分别超过 48 小时或 15 天为失败。
 
 ## 5. 盘口 V2 审计与离线修复
 

@@ -1,7 +1,7 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.6
-> 更新日期：2026-07-17
+> 版本：V1.7
+> 更新日期：2026-07-20
 
 ## 1. 本地运行方式
 
@@ -52,9 +52,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 .\.venv\Scripts\football-cups-db.exe init --workspace . --target-version 007
 ```
 
-数据库已高于指定目标时会拒绝回退。已经应用的 006/007 不得修改；问题必须使用新迁移修正。当前主库已应用007，日常导入不再传 `--target-version`。
+数据库已高于指定目标时会拒绝回退。已经应用的 006/007/008 不得修改；问题必须使用新迁移修正。迁移 008 为无效 fixture 建立逻辑排除视图，当前主库已应用 008，日常导入不再传 `--target-version`。
 
-`status` 额外返回 `current_verified_results`、`strict_fixture_results_by_cutoff` 和 `model_eligible_snapshots_by_cutoff`。后两者按不同预测切点统计不同 fixture，不能把同场多个切点相加作为阶段 4 的 500 场门禁。
+`status` 额外返回 `current_verified_results`、`current_invalid_fixtures`、`strict_fixture_results_by_cutoff` 和 `model_eligible_snapshots_by_cutoff`。无效 fixture 不进入当前已验证赛果、严格赛果或模型合格快照计数；按切点统计时不能把同场多个切点相加作为阶段 4 的 500 场门禁。
 
 研究层使用独立入口：
 
