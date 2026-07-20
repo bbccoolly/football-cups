@@ -68,6 +68,14 @@ def database_status(connection: Connection) -> dict[str, Any]:
     current_verified = connection.execute(
         "SELECT count(*) AS count FROM football.current_verified_results"
     ).fetchone()
+    verified_results_by_method = {
+        str(row["verification_method"]): int(row["count"])
+        for row in connection.execute(
+            "SELECT verification_method, count(DISTINCT fixture_id) AS count "
+            "FROM football.current_verified_results "
+            "GROUP BY verification_method ORDER BY verification_method"
+        ).fetchall()
+    }
     invalid_fixtures = 0
     invalid_relation = connection.execute(
         "SELECT to_regclass('football.current_invalid_fixtures') AS name"
@@ -105,6 +113,7 @@ def database_status(connection: Connection) -> dict[str, Any]:
         "checkpoints": dict(checkpoint),
         "unsupported_records": int(unsupported["count"]),
         "current_verified_results": int(current_verified["count"]),
+        "verified_result_count_by_method": verified_results_by_method,
         "current_invalid_fixtures": invalid_fixtures,
         "strict_fixture_results_by_cutoff": strict_results_by_cutoff,
         "model_eligible_snapshots_by_cutoff": model_eligible_by_cutoff,

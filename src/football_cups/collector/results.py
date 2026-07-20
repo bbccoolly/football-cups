@@ -305,6 +305,9 @@ def make_verified_result(
     candidate_id: str | None = None,
     supersedes_record_id: str | None = None,
     correction_reason: str | None = None,
+    evidence_level: str | None = None,
+    attestor_id: str | None = None,
+    attestation_note: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -324,6 +327,9 @@ def make_verified_result(
         "candidate_id": candidate_id,
         "supersedes_record_id": supersedes_record_id,
         "correction_reason": correction_reason,
+        "evidence_level": evidence_level,
+        "attestor_id": attestor_id,
+        "attestation_note": attestation_note,
     }
 
 

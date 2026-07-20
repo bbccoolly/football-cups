@@ -293,7 +293,7 @@ def test_result_metrics_count_unique_fixtures_and_24h_deadlines(tmp_path) -> Non
             occurred_at=kickoff + timedelta(hours=3), fixture_id="102", cutoff="T+3h"
         )
         state.add_event(
-            "verified_result", "accepted", {},
+            "verified_result", "accepted", {"verification_method": "automatic-test"},
             occurred_at=kickoff + timedelta(hours=6), fixture_id="101"
         )
         state.add_event(
@@ -305,6 +305,9 @@ def test_result_metrics_count_unique_fixtures_and_24h_deadlines(tmp_path) -> Non
     assert metrics["result_fixture_denominator"] == 2
     assert metrics["result_candidate_coverage_24h"] == 0.5
     assert metrics["verified_result_coverage"] == 0.5
+    assert metrics["automatic_verified_result_coverage"] == 0.5
+    assert metrics["manual_declared_result_coverage"] == 0.0
+    assert metrics["verified_result_count_by_method"] == {"automatic-test": 1}
     assert metrics["result_success_rate_by_target"]["T+3h"] == 0.5
     assert metrics["strict_fixture_result_count_by_cutoff"] == {"T-60m": 1}
 

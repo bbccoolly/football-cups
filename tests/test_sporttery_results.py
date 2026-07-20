@@ -119,6 +119,18 @@ def test_sporttery_reconcile_dry_run_does_not_write_result_files(tmp_path, monke
     fixed_url = sporttery_fixed_bonus_url("2040541")
     with CollectorService(config) as service:
         service.state.upsert_fixture(identity, now, identity_conflict=False)
+        service.data.write_result(
+            "verified",
+            {
+                "record_type": "VerifiedResult",
+                "record_id": "manual-verified-1359167",
+                "fixture_id": "1359167",
+                "home_goals": 0,
+                "away_goals": 0,
+                "verification_method": "project-owner-manual-declaration",
+            },
+            now,
+        )
 
         def fake_request(_method, url, **_kwargs):
             if url == SPORTTERY_RESULT_PAGE_URL:
@@ -178,7 +190,8 @@ def test_sporttery_reconcile_dry_run_does_not_write_result_files(tmp_path, monke
 
     assert result["counts"]["candidate"] == 1
     assert result["counts"]["verified"] == 1
-    assert not list((config.data_dir / "results").rglob("*.json"))
+    assert not list((config.data_dir / "results").rglob("candidates/*.json"))
+    assert len(list((config.data_dir / "results").rglob("verified/*.json"))) == 1
 
 
 def test_sporttery_reconcile_filters_requested_fixture(tmp_path, monkeypatch) -> None:
@@ -241,6 +254,75 @@ def test_sporttery_reconcile_filters_requested_fixture(tmp_path, monkeypatch) ->
 
     assert result["fixtures_queued"] == 1
     assert result["requested_fixture_ids"] == ["1359167"]
+    assert result["counts"] == {"missing": 1}
+
+
+def test_sporttery_reconcile_rechecks_manual_but_skips_automatic_results(
+    tmp_path, monkeypatch
+) -> None:
+    config = config_for(tmp_path)
+    kickoff = datetime(2026, 7, 19, 19, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 20, 2, tzinfo=timezone.utc)
+    with CollectorService(config) as service:
+        for fixture_id in ("1359167", "1359168"):
+            service.state.upsert_fixture(
+                {
+                    "fixture_id": fixture_id,
+                    "competition_name": "世界杯",
+                    "competition_id": "101",
+                    "match_number": "周日104",
+                    "home_team_id": f"h-{fixture_id}",
+                    "home_team_name": "Home",
+                    "away_team_id": f"a-{fixture_id}",
+                    "away_team_name": "Away",
+                    "kickoff_at": iso_utc(kickoff),
+                },
+                now,
+                identity_conflict=False,
+            )
+        for fixture_id, method in (
+            ("1359167", "project-owner-manual-declaration"),
+            ("1359168", "500-two-page-regular-time-competition"),
+        ):
+            service.data.write_result(
+                "verified",
+                {
+                    "record_type": "VerifiedResult",
+                    "record_id": f"verified-{fixture_id}",
+                    "fixture_id": fixture_id,
+                    "home_goals": 1,
+                    "away_goals": 0,
+                    "verification_method": method,
+                },
+                now,
+            )
+        monkeypatch.setattr(
+            service,
+            "_fetch_sporttery_scope",
+            lambda: ({"url": SPORTTERY_RESULT_PAGE_URL, "sha256": "a" * 64}, now),
+        )
+        monkeypatch.setattr(
+            service,
+            "_fetch_sporttery_inventory",
+            lambda *_args, **_kwargs: {
+                "batch": {
+                    "record_id": "batch-1",
+                    "observed_at": iso_utc(now),
+                    "complete": True,
+                    "row_count": 0,
+                },
+                "rows": [],
+                "inventory_blob": {"url": "https://example.invalid", "sha256": "b" * 64},
+            },
+        )
+        result = service.reconcile_results(
+            datetime(2026, 7, 19, tzinfo=timezone.utc),
+            datetime(2026, 7, 21, tzinfo=timezone.utc),
+            source="sporttery",
+            apply=False,
+        )
+
+    assert result["fixtures_queued"] == 1
     assert result["counts"] == {"missing": 1}
 
 

@@ -334,6 +334,136 @@ def test_new_fixture_invalidation_requires_source_evidence(tmp_path) -> None:
             service.invalidate_fixture("123", reason="invalid_match")
 
 
+def _write_candidate(
+    service: CollectorService,
+    fixture_id: str,
+    *,
+    home_goals: int,
+    away_goals: int,
+    observed_at: datetime,
+    consistency: str = "passed",
+) -> dict:
+    candidate = {
+        "schema_version": 1,
+        "record_type": "ResultCandidate",
+        "record_id": f"candidate-{fixture_id}-{home_goals}-{away_goals}-{observed_at.timestamp()}",
+        "fixture_id": fixture_id,
+        "kickoff_at": iso_utc(observed_at - timedelta(hours=3)),
+        "home_goals": home_goals,
+        "away_goals": away_goals,
+        "status_code": "4",
+        "observed_at": iso_utc(observed_at),
+        "scope": "candidate-full-time-scope-not-yet-confirmed",
+        "analysis_consistency": consistency,
+        "source_urls": ["https://example.test/result"],
+    }
+    service.data.write_result("candidates", candidate, observed_at)
+    return candidate
+
+
+def test_project_owner_confirms_candidates_in_one_prevalidated_batch(tmp_path) -> None:
+    config = config_for(tmp_path)
+    now = datetime(2026, 7, 20, 2, tzinfo=timezone.utc)
+    with CollectorService(config) as service:
+        for fixture_id, score in (("123", (2, 1)), ("124", (0, 0))):
+            identity = {
+                "fixture_id": fixture_id,
+                "competition_name": "Cup",
+                "competition_id": "101",
+                "home_team_id": f"h-{fixture_id}",
+                "away_team_id": f"a-{fixture_id}",
+                "kickoff_at": iso_utc(now - timedelta(hours=3)),
+            }
+            service.state.upsert_fixture(identity, now, identity_conflict=False)
+            _write_candidate(
+                service,
+                fixture_id,
+                home_goals=score[0],
+                away_goals=score[1],
+                observed_at=now,
+            )
+
+        first = service.confirm_candidate_results(
+            ["123", "124"],
+            confirm_90_minutes=True,
+            note="Project owner confirmed regular-time scope",
+        )
+        second = service.confirm_candidate_results(
+            ["123", "124"],
+            confirm_90_minutes=True,
+            note="Project owner confirmed regular-time scope",
+        )
+
+    assert first["confirmed_count"] == 2
+    assert second["confirmed_count"] == 0
+    assert second["unchanged_count"] == 2
+    verified = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (config.data_dir / "results").rglob("verified/*.json")
+    ]
+    assert len(verified) == 2
+    assert {record["verification_method"] for record in verified} == {
+        "project-owner-manual-declaration"
+    }
+    assert {record["evidence_level"] for record in verified} == {"self_attestation"}
+    assert {record["attestor_id"] for record in verified} == {"project-owner"}
+    assert all(record["source_url"].endswith(record["candidate_id"]) for record in verified)
+
+
+def test_project_owner_confirmation_preflight_failure_writes_nothing(tmp_path) -> None:
+    config = config_for(tmp_path)
+    now = datetime(2026, 7, 20, 2, tzinfo=timezone.utc)
+    with CollectorService(config) as service:
+        identity = {
+            "fixture_id": "123",
+            "competition_name": "Cup",
+            "competition_id": "101",
+            "home_team_id": "h-123",
+            "away_team_id": "a-123",
+            "kickoff_at": iso_utc(now - timedelta(hours=3)),
+        }
+        service.state.upsert_fixture(identity, now, identity_conflict=False)
+        _write_candidate(service, "123", home_goals=2, away_goals=1, observed_at=now)
+        with pytest.raises(ValueError, match="999=unknown_fixture"):
+            service.confirm_candidate_results(
+                ["123", "999"],
+                confirm_90_minutes=True,
+                note="Project owner confirmed regular-time scope",
+            )
+
+    assert list((config.data_dir / "results").rglob("verified/*.json")) == []
+    assert list((config.data_dir / "manifests").rglob("*-manual-result-confirmation.json")) == []
+
+
+def test_project_owner_confirmation_rejects_candidate_score_conflict(tmp_path) -> None:
+    config = config_for(tmp_path)
+    now = datetime(2026, 7, 20, 2, tzinfo=timezone.utc)
+    with CollectorService(config) as service:
+        identity = {
+            "fixture_id": "123",
+            "competition_name": "Cup",
+            "competition_id": "101",
+            "home_team_id": "h-123",
+            "away_team_id": "a-123",
+            "kickoff_at": iso_utc(now - timedelta(hours=3)),
+        }
+        service.state.upsert_fixture(identity, now, identity_conflict=False)
+        _write_candidate(service, "123", home_goals=2, away_goals=1, observed_at=now)
+        _write_candidate(
+            service,
+            "123",
+            home_goals=3,
+            away_goals=1,
+            observed_at=now + timedelta(minutes=1),
+        )
+        with pytest.raises(ValueError, match="candidate_score_conflict"):
+            service.confirm_candidate_results(
+                ["123"],
+                confirm_90_minutes=True,
+                note="Project owner confirmed regular-time scope",
+            )
+
+
 def test_manual_verified_result_conflict_is_not_overwritten(tmp_path) -> None:
     store = DataStore(config_for(tmp_path))
     first = tmp_path / "first.csv"

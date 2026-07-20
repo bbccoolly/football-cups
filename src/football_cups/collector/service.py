@@ -60,6 +60,12 @@ from .timeutil import iso_utc, parse_http_date, parse_iso, utc_now
 
 
 LOGGER = logging.getLogger(__name__)
+PROJECT_OWNER_MANUAL_METHOD = "project-owner-manual-declaration"
+PROJECT_OWNER_ATTESTOR = "project-owner"
+SELF_ATTESTATION_LEVEL = "self_attestation"
+LEGACY_MANUAL_METHODS = {"manual", "manual-import"}
+
+
 class CriticalCollectorError(RuntimeError):
     pass
 
@@ -1091,7 +1097,11 @@ class CollectorService:
                             self.emit_quality(
                                 "verified_result",
                                 "accepted",
-                                {"record_id": verified["record_id"], "target": target},
+                                {
+                                    "record_id": verified["record_id"],
+                                    "target": target,
+                                    "verification_method": verified["verification_method"],
+                                },
                                 at=observed,
                                 fixture_id=fixture_id,
                                 competition=fixture_state.get("competition"),
@@ -1331,12 +1341,19 @@ class CollectorService:
         candidates = existing_result_records(self.config.data_dir, "candidates")
         verified = existing_result_records(self.config.data_dir, "verified")
         verified_scores: dict[str, tuple[int, int]] = {}
+        automatically_verified_ids: set[str] = set()
         for record in verified:
             try:
-                verified_scores[str(record["fixture_id"])] = (
+                fixture_id = str(record["fixture_id"])
+                method = str(record.get("verification_method") or "")
+                if method in LEGACY_MANUAL_METHODS:
+                    continue
+                verified_scores[fixture_id] = (
                     int(record["home_goals"]),
                     int(record["away_goals"]),
                 )
+                if method != PROJECT_OWNER_MANUAL_METHOD:
+                    automatically_verified_ids.add(fixture_id)
             except (KeyError, TypeError, ValueError):
                 continue
         candidate_scores: dict[str, set[tuple[int, int]]] = defaultdict(set)
@@ -1360,7 +1377,7 @@ class CollectorService:
             kickoff = parse_iso(kickoff_text)
             if not (start <= kickoff < end) or kickoff > requested_at:
                 continue
-            if fixture_id in verified_scores:
+            if fixture_id in automatically_verified_ids:
                 continue
             fixtures.append(fixture)
             date_key = kickoff.astimezone(ZoneInfo(self.config.timezone_name)).date().isoformat()
@@ -1593,7 +1610,7 @@ class CollectorService:
                         "accepted",
                         {
                             "record_id": verified_record["record_id"],
-                            "method": "sporttery-official-90-minute",
+                            "verification_method": "sporttery-official-90-minute",
                             "sporttery_result_observation_id": observation["record_id"],
                         },
                         at=observed,
@@ -1823,6 +1840,225 @@ class CollectorService:
             )
         return (2 if conflicts else 0), {"imported": len(imported), "conflicts": conflicts}
 
+    def confirm_candidate_results(
+        self,
+        fixture_ids: list[str],
+        *,
+        confirm_90_minutes: bool,
+        note: str,
+    ) -> dict[str, Any]:
+        if not confirm_90_minutes:
+            raise ValueError("--confirm-90-minutes is required")
+        normalized_ids = [str(value).strip() for value in fixture_ids]
+        if not normalized_ids or len(normalized_ids) > 100:
+            raise ValueError("between 1 and 100 fixture IDs are required")
+        if any(not fixture_id.isdigit() for fixture_id in normalized_ids):
+            raise ValueError("fixture-id must be numeric")
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise ValueError("duplicate fixture-id is not allowed")
+        note = note.strip()
+        if not note:
+            raise ValueError("--note is required")
+
+        fixtures = self.state.fixtures_by_ids(set(normalized_ids))
+        candidates_by_fixture: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for candidate in existing_result_records(self.config.data_dir, "candidates"):
+            candidates_by_fixture[str(candidate.get("fixture_id"))].append(candidate)
+        verified_by_fixture: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for verified in existing_result_records(self.config.data_dir, "verified"):
+            verified_by_fixture[str(verified.get("fixture_id"))].append(verified)
+
+        prepared: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        unchanged: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        for fixture_id in normalized_ids:
+            fixture = fixtures.get(fixture_id)
+            if fixture is None:
+                errors.append({"fixture_id": fixture_id, "reason": "unknown_fixture"})
+                continue
+            if self.state.is_fixture_invalidated(fixture_id):
+                errors.append({"fixture_id": fixture_id, "reason": "fixture_invalidated"})
+                continue
+            if bool(fixture.get("identity_conflict")):
+                errors.append({"fixture_id": fixture_id, "reason": "identity_conflict"})
+                continue
+            blocking_event = self.state.connection.execute(
+                "SELECT event_type FROM events WHERE fixture_id=? AND "
+                "((event_type IN ('result_conflict','verified_result_conflict') AND status='failure') "
+                "OR (event_type='result_cancelled' AND status='excluded')) "
+                "ORDER BY occurred_at DESC LIMIT 1",
+                (fixture_id,),
+            ).fetchone()
+            if blocking_event is not None:
+                errors.append(
+                    {"fixture_id": fixture_id, "reason": str(blocking_event["event_type"])}
+                )
+                continue
+
+            candidates = candidates_by_fixture.get(fixture_id, [])
+            scores = {
+                (candidate.get("home_goals"), candidate.get("away_goals"))
+                for candidate in candidates
+            }
+            if not candidates:
+                errors.append({"fixture_id": fixture_id, "reason": "candidate_missing"})
+                continue
+            if len(scores) != 1:
+                errors.append({"fixture_id": fixture_id, "reason": "candidate_score_conflict"})
+                continue
+            passed = [
+                candidate
+                for candidate in candidates
+                if candidate.get("analysis_consistency") == "passed"
+            ]
+            if not passed:
+                errors.append({"fixture_id": fixture_id, "reason": "passed_candidate_missing"})
+                continue
+            candidate = max(
+                passed,
+                key=lambda item: (str(item.get("observed_at") or ""), str(item["record_id"])),
+            )
+            score = (candidate.get("home_goals"), candidate.get("away_goals"))
+            if not all(isinstance(value, int) and value >= 0 for value in score):
+                errors.append({"fixture_id": fixture_id, "reason": "candidate_score_invalid"})
+                continue
+
+            accepted = [
+                result
+                for result in verified_by_fixture.get(fixture_id, [])
+                if result.get("verification_status", "accepted") == "accepted"
+            ]
+            accepted_scores = {
+                (result.get("home_goals"), result.get("away_goals")) for result in accepted
+            }
+            if len(accepted_scores) > 1 or (accepted_scores and score not in accepted_scores):
+                errors.append({"fixture_id": fixture_id, "reason": "verified_result_conflict"})
+                continue
+            eligible_existing = [
+                result
+                for result in accepted
+                if result.get("verification_method") not in LEGACY_MANUAL_METHODS
+                and (
+                    result.get("verification_method") != PROJECT_OWNER_MANUAL_METHOD
+                    or (
+                        result.get("candidate_id") == candidate["record_id"]
+                        and result.get("evidence_level") == SELF_ATTESTATION_LEVEL
+                        and result.get("attestor_id") == PROJECT_OWNER_ATTESTOR
+                    )
+                )
+            ]
+            if eligible_existing:
+                unchanged.append(
+                    {
+                        "fixture_id": fixture_id,
+                        "candidate_id": candidate["record_id"],
+                        "home_goals": score[0],
+                        "away_goals": score[1],
+                        "verified_result_id": max(
+                            eligible_existing,
+                            key=lambda item: (
+                                str(item.get("confirmed_at") or ""),
+                                str(item["record_id"]),
+                            ),
+                        )["record_id"],
+                    }
+                )
+                continue
+
+            source_url = f"urn:football-cups:manual-declaration:{candidate['record_id']}"
+            confirmed_at = utc_now()
+            record = make_verified_result(
+                fixture_id=fixture_id,
+                home_goals=int(score[0]),
+                away_goals=int(score[1]),
+                source_url=source_url,
+                confirmed_at=confirmed_at,
+                method=PROJECT_OWNER_MANUAL_METHOD,
+                notes=note,
+                candidate_id=str(candidate["record_id"]),
+                evidence_level=SELF_ATTESTATION_LEVEL,
+                attestor_id=PROJECT_OWNER_ATTESTOR,
+                attestation_note=note,
+            )
+            prepared.append((record, candidate))
+
+        if errors:
+            raise ValueError(
+                "candidate confirmation preflight failed: "
+                + "; ".join(
+                    f"{item['fixture_id']}={item['reason']}" for item in errors
+                )
+            )
+
+        confirmed: list[dict[str, Any]] = []
+        for record, candidate in prepared:
+            confirmed_at = parse_iso(str(record["confirmed_at"]))
+            self.data.write_result("verified", record, confirmed_at)
+            if self.state.claim_record(record["record_id"], "VerifiedResult", confirmed_at):
+                self.data.append_normalized("verified_results", record, confirmed_at)
+                fixture = fixtures[str(record["fixture_id"])]
+                self.emit_quality(
+                    "verified_result",
+                    "accepted",
+                    {
+                        "record_id": record["record_id"],
+                        "candidate_id": candidate["record_id"],
+                        "verification_method": PROJECT_OWNER_MANUAL_METHOD,
+                        "evidence_level": SELF_ATTESTATION_LEVEL,
+                        "attestor_id": PROJECT_OWNER_ATTESTOR,
+                        "event_origin": "live",
+                    },
+                    at=confirmed_at,
+                    fixture_id=str(record["fixture_id"]),
+                    competition=str(fixture.get("competition") or "") or None,
+                )
+                confirmed.append(
+                    {
+                        "fixture_id": record["fixture_id"],
+                        "candidate_id": candidate["record_id"],
+                        "verified_result_id": record["record_id"],
+                        "home_goals": record["home_goals"],
+                        "away_goals": record["away_goals"],
+                    }
+                )
+            else:
+                unchanged.append(
+                    {
+                        "fixture_id": record["fixture_id"],
+                        "candidate_id": candidate["record_id"],
+                        "home_goals": record["home_goals"],
+                        "away_goals": record["away_goals"],
+                        "verified_result_id": record["record_id"],
+                    }
+                )
+
+        completed_at = utc_now()
+        run_id = make_run_id(completed_at)
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "record_type": "ResultConfirmationRun",
+            "run_id": run_id,
+            "status": "completed",
+            "confirmed_at": iso_utc(completed_at),
+            "verification_method": PROJECT_OWNER_MANUAL_METHOD,
+            "evidence_level": SELF_ATTESTATION_LEVEL,
+            "attestor_id": PROJECT_OWNER_ATTESTOR,
+            "fixture_ids": normalized_ids,
+            "confirmed": confirmed,
+            "unchanged": unchanged,
+        }
+        manifest_path = self.data.write_manifest(
+            "manual-result-confirmation", run_id, manifest, completed_at
+        )
+        return {
+            "status": "completed",
+            "confirmed_count": len(confirmed),
+            "unchanged_count": len(unchanged),
+            "confirmed": confirmed,
+            "unchanged": unchanged,
+            "manifest_path": str(manifest_path),
+        }
+
     def smoke_live(
         self,
         *,
@@ -1964,7 +2200,12 @@ def rebuild_state(config: CollectorConfig) -> dict[str, Any]:
             rebuilt.add_event(
                 "verified_result",
                 "accepted",
-                {"record_id": record["record_id"], "target": "rebuilt"},
+                {
+                    "record_id": record["record_id"],
+                    "target": "rebuilt",
+                    "verification_method": record.get("verification_method"),
+                    "evidence_level": record.get("evidence_level"),
+                },
                 occurred_at=confirmed,
                 fixture_id=fixture_id,
                 cutoff="rebuilt",

@@ -215,6 +215,9 @@ def base_record(record_type: str, **values):
             source_url="https://example.test/result",
             verification_method="manual",
             verification_status="accepted",
+            evidence_level="self_attestation",
+            attestor_id="project-owner",
+            attestation_note="confirmed",
         ),
         base_record(
             "QualityEvent",
@@ -488,6 +491,61 @@ def test_postgres_replay_and_as_of_integration(tmp_path) -> None:
             "SELECT count(*) AS count FROM football.current_verified_results"
         ).fetchone()
         assert current_after_conflict["count"] == 0
+
+        assert apply_migrations(connection, target_version="011") == ["009", "010", "011"]
+        assert connection.execute(
+            "SELECT count(*) AS count FROM football.current_verified_results"
+        ).fetchone()["count"] == 0
+        assert insert_record(
+            connection,
+            base_record(
+                "ResultCandidate",
+                record_id="manual-candidate",
+                fixture_id="124",
+                observed_at="2026-07-16T13:00:00Z",
+                kickoff_at="2026-07-16T10:00:00Z",
+                home_goals=3,
+                away_goals=2,
+                scope="candidate-full-time-scope-not-yet-confirmed",
+                status_code="4",
+                live_page_sha256="live-page-124",
+                analysis_consistency="passed",
+                source_urls=["https://example.test/result/124"],
+            ),
+            source_file="normalized/manual-confirmation.jsonl",
+            source_line=1,
+        )
+        assert insert_record(
+            connection,
+            base_record(
+                "VerifiedResult",
+                record_id="manual-attestation",
+                fixture_id="124",
+                confirmed_at="2026-07-16T14:00:00Z",
+                home_goals=3,
+                away_goals=2,
+                scope="90-minutes-including-stoppage",
+                source_url="urn:football-cups:manual-declaration:manual-candidate",
+                verification_method="project-owner-manual-declaration",
+                verification_status="accepted",
+                candidate_id="manual-candidate",
+                evidence_level="self_attestation",
+                attestor_id="project-owner",
+                attestation_note="Project owner confirmed regular-time scope",
+            ),
+            source_file="normalized/manual-confirmation.jsonl",
+            source_line=2,
+        )
+        connection.commit()
+        manual_current = connection.execute(
+            "SELECT fixture_id, evidence_level, attestor_id "
+            "FROM football.current_verified_results"
+        ).fetchone()
+        assert manual_current == {
+            "fixture_id": "124",
+            "evidence_level": "self_attestation",
+            "attestor_id": "project-owner",
+        }
 
         checkpoint_before = connection.execute(
             "SELECT byte_offset, line_number FROM football.import_checkpoints"

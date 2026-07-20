@@ -690,32 +690,48 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
         return
 
     if record_type == "VerifiedResult":
+        attestation = any(
+            record.get(key) is not None
+            for key in ("evidence_level", "attestor_id", "attestation_note")
+        )
+        attestation_columns = (
+            ", evidence_level, attestor_id, attestation_note" if attestation else ""
+        )
+        attestation_placeholders = ", %s, %s, %s" if attestation else ""
+        params = (
+            record_id,
+            fixture_id,
+            parse_time(record.get("confirmed_at")),
+            record.get("home_goals"),
+            record.get("away_goals"),
+            record.get("scope"),
+            record.get("source_url"),
+            record.get("verification_method"),
+            record.get("verification_status") or "accepted",
+            record.get("notes"),
+            record.get("candidate_id"),
+            record.get("supersedes_record_id"),
+            record.get("correction_reason"),
+        )
+        if attestation:
+            params += (
+                record.get("evidence_level"),
+                record.get("attestor_id"),
+                record.get("attestation_note"),
+            )
         connection.execute(
-            """
+            f"""
             INSERT INTO football.verified_results (
                 record_id, fixture_id, confirmed_at, home_goals, away_goals,
                 scope, source_url, verification_method, verification_status,
                 notes, candidate_id, supersedes_record_id, correction_reason
+                {attestation_columns}
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s
+                %s, %s, %s{attestation_placeholders}
             ) ON CONFLICT (record_id) DO NOTHING
             """,
-            (
-                record_id,
-                fixture_id,
-                parse_time(record.get("confirmed_at")),
-                record.get("home_goals"),
-                record.get("away_goals"),
-                record.get("scope"),
-                record.get("source_url"),
-                record.get("verification_method"),
-                record.get("verification_status") or "accepted",
-                record.get("notes"),
-                record.get("candidate_id"),
-                record.get("supersedes_record_id"),
-                record.get("correction_reason"),
-            ),
+            params,
         )
         return
 

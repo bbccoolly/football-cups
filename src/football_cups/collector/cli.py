@@ -71,6 +71,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "audit-market-data",
         "reparse-markets",
         "invalidate-fixture",
+        "confirm-candidate-results",
     ):
         subparser = subparsers.add_parser(name)
         add_workspace_argument(subparser)
@@ -110,6 +111,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             subparser.add_argument("--reason", required=True)
             subparser.add_argument("--source-url", required=True)
             subparser.add_argument("--note")
+        if name == "confirm-candidate-results":
+            subparser.add_argument("--fixture-id", action="append", required=True)
+            subparser.add_argument("--confirm-90-minutes", action="store_true")
+            subparser.add_argument("--note", required=True)
     verify = subparsers.add_parser("verify-results")
     add_workspace_argument(verify)
     verify.add_argument("--input", type=Path, required=True)
@@ -429,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "run-once":
                 _record_locked_skip(config, args.command)
             print(json_dumps({"status": "skipped_locked"}, indent=2))
-            return 0
+            return 1 if args.command == "confirm-candidate-results" else 0
         if args.command == "audit-market-data":
             try:
                 result = audit_market_data(config)
@@ -527,6 +532,21 @@ def main(argv: list[str] | None = None) -> int:
                 except ValueError as exc:
                     print(json_dumps({"status": "invalid", "error": str(exc)}, indent=2))
                     return 2
+                print(json_dumps(result, indent=2))
+                return 0
+            if args.command == "confirm-candidate-results":
+                try:
+                    result = service.confirm_candidate_results(
+                        args.fixture_id,
+                        confirm_90_minutes=args.confirm_90_minutes,
+                        note=args.note,
+                    )
+                except ValueError as exc:
+                    print(json_dumps({"status": "invalid", "error": str(exc)}, indent=2))
+                    return 2
+                except (OSError, sqlite3.Error) as exc:
+                    print(json_dumps({"status": "failed", "error": str(exc)}, indent=2))
+                    return 3
                 print(json_dumps(result, indent=2))
                 return 0
             if args.command == "report-daily":

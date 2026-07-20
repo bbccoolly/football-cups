@@ -63,6 +63,9 @@ def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[s
     fixture_ids = set(kickoff_by_fixture)
     candidate_at: dict[str, datetime] = {}
     verified_ids: set[str] = set()
+    automatic_verified_ids: set[str] = set()
+    manual_verified_ids: set[str] = set()
+    verified_by_method: dict[str, set[str]] = defaultdict(set)
     unresolved_ids: set[str] = set()
     conflict_ids: set[str] = set()
     ambiguous_ids: set[str] = set()
@@ -95,6 +98,17 @@ def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[s
                     target_success[target].add(fixture_id)
             elif event_type == "verified_result" and status == "accepted":
                 verified_ids.add(fixture_id)
+                details = json.loads(row["details_json"])
+                method = str(
+                    details.get("verification_method")
+                    or details.get("method")
+                    or "automatic-legacy"
+                )
+                verified_by_method[method].add(fixture_id)
+                if method == "project-owner-manual-declaration":
+                    manual_verified_ids.add(fixture_id)
+                else:
+                    automatic_verified_ids.add(fixture_id)
             elif event_type == "result_unresolved":
                 unresolved_ids.add(fixture_id)
             elif event_type == "result_conflict":
@@ -112,6 +126,14 @@ def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[s
     }
     verified_ids.difference_update(conflict_ids)
     verified_ids.intersection_update(eligible_fixture_ids)
+    automatic_verified_ids.difference_update(conflict_ids)
+    automatic_verified_ids.intersection_update(eligible_fixture_ids)
+    manual_verified_ids.difference_update(conflict_ids)
+    manual_verified_ids.intersection_update(eligible_fixture_ids)
+    for fixture_set in verified_by_method.values():
+        fixture_set.difference_update(conflict_ids)
+        fixture_set.intersection_update(eligible_fixture_ids)
+    ambiguous_ids.difference_update(verified_ids)
 
     strict_by_cutoff: dict[str, int] = {}
     if verified_ids:
@@ -128,9 +150,16 @@ def _result_metrics(state: StateStore, start: datetime, end: datetime) -> dict[s
     return {
         "result_candidate_coverage_24h": _ratio(len(candidate_within_24h), denominator),
         "verified_result_coverage": _ratio(len(verified_ids), denominator),
+        "automatic_verified_result_coverage": _ratio(
+            len(automatic_verified_ids), denominator
+        ),
+        "manual_declared_result_coverage": _ratio(len(manual_verified_ids), denominator),
         "result_fixture_denominator": denominator,
         "result_candidate_within_24h_count": len(candidate_within_24h),
         "verified_result_count": len(verified_ids),
+        "verified_result_count_by_method": {
+            method: len(fixtures) for method, fixtures in sorted(verified_by_method.items())
+        },
         "result_unresolved_count": len(unresolved_ids),
         "result_conflict_count": len(conflict_ids),
         "result_scope_ambiguous_count": len(ambiguous_ids),

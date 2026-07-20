@@ -213,6 +213,18 @@ strict_fixture_result_count_by_cutoff
 
 `T+24h` 后仍缺少候选或一致性证据时，采集器每日补偿至 `T+7d`。`reconcile-results` 可立即重查历史缺口，但新证据使用真实观察时间，不能倒填。`verify-results` 仅为旧接口兼容，不属于正式操作流程。
 
+项目负责人已明确核验现有候选为常规时间结果时执行：
+
+```powershell
+.\.venv\Scripts\football-cups-collector.exe confirm-candidate-results `
+  --workspace . `
+  --fixture-id <id> `
+  --confirm-90-minutes `
+  --note "Project owner confirmed the candidate score as a regular-time result"
+```
+
+可重复传入最多100个 `--fixture-id`。命令不接收比分，先验证全部候选、身份、无效状态和冲突；任一失败时整批不写。成功后运行两次 `football-cups-db import-files --workspace .`，第二次新增必须为0，并检查 `current_verified_results`、严格切点计数及按方法拆分的覆盖率。人工声明不改变体彩接口成功率，8天窗口内的官方自动补偿继续运行。
+
 人工核验确认场次无效、取消或未结算时，保留证据 URL 并执行：
 
 ```powershell
