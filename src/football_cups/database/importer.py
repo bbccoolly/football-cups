@@ -27,6 +27,10 @@ SUPPORTED_RECORD_TYPES = frozenset(
         "MarketNormalization",
         "SnapshotEligibilityAssessment",
         "HandicapIndexRow",
+        "SportteryScopeEvidence",
+        "SportteryInventoryBatch",
+        "SportteryFixtureLink",
+        "SportteryResultObservation",
         "ResultCandidate",
         "VerifiedResult",
         "QualityEvent",
@@ -518,34 +522,169 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
         return
 
     if record_type == "ResultCandidate":
+        official_candidate = any(
+            record.get(key) is not None
+            for key in (
+                "official_scope",
+                "sporttery_result_observation_id",
+                "sporttery_fixture_link_id",
+            )
+        )
+        official_columns = (
+            ", official_scope, sporttery_result_observation_id, sporttery_fixture_link_id"
+            if official_candidate
+            else ""
+        )
+        official_placeholders = ", %s, %s, %s" if official_candidate else ""
+        params = (
+            record_id,
+            fixture_id,
+            parse_time(record.get("observed_at")),
+            parse_time(record.get("kickoff_at")),
+            record.get("home_goals"),
+            record.get("away_goals"),
+            record.get("half_time_score_raw"),
+            record.get("status_raw"),
+            record.get("status_code"),
+            record.get("scope"),
+            record.get("completed_page_sha256"),
+            record.get("live_page_sha256"),
+            record.get("analysis_page_sha256"),
+            record.get("analysis_consistency"),
+            Jsonb(record.get("source_urls") or []),
+        )
+        if official_candidate:
+            params += (
+                record.get("official_scope"),
+                record.get("sporttery_result_observation_id"),
+                record.get("sporttery_fixture_link_id"),
+            )
         connection.execute(
-            """
+            f"""
             INSERT INTO football.result_candidates (
                 record_id, fixture_id, observed_at, kickoff_at, home_goals, away_goals,
                 half_time_score_raw, status_raw, status_code, scope,
                 completed_page_sha256, live_page_sha256, analysis_page_sha256,
-                analysis_consistency, source_urls
+                analysis_consistency, source_urls{official_columns}
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s{official_placeholders}
+            ) ON CONFLICT (record_id) DO NOTHING
+            """,
+            params,
+        )
+        return
+
+    if record_type == "SportteryScopeEvidence":
+        connection.execute(
+            """
+            INSERT INTO football.sporttery_scope_evidence (
+                record_id, observed_at, source_url, source_sha256,
+                inventory_batch_record_id, scope, scope_text, status
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                parse_time(record.get("observed_at")),
+                record.get("source_url"),
+                record.get("source_sha256"),
+                record.get("inventory_batch_record_id"),
+                record.get("scope"),
+                record.get("scope_text"),
+                record.get("status"),
+            ),
+        )
+        return
+
+    if record_type == "SportteryInventoryBatch":
+        connection.execute(
+            """
+            INSERT INTO football.sporttery_inventory_batches (
+                record_id, run_id, observed_at, begin_date, end_date,
+                page_size, page_count, row_count, complete, raw_sha256s, source_urls,
+                failure_reason
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                record.get("run_id"),
+                parse_time(record.get("observed_at")),
+                record.get("begin_date"),
+                record.get("end_date"),
+                record.get("page_size"),
+                record.get("page_count"),
+                record.get("row_count"),
+                bool(record.get("complete")),
+                Jsonb(record.get("raw_sha256s") or []),
+                Jsonb(record.get("source_urls") or []),
+                record.get("failure_reason"),
+            ),
+        )
+        return
+
+    if record_type == "SportteryFixtureLink":
+        connection.execute(
+            """
+            INSERT INTO football.sporttery_fixture_links (
+                record_id, fixture_id, sporttery_match_id, observed_at,
+                inventory_batch_record_id, match_number, mapping_status,
+                rejection_reason, official_kickoff_at, official_home_name,
+                official_away_name, source_fixture_identity_record_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id,
+                fixture_id,
+                record.get("sporttery_match_id"),
+                parse_time(record.get("observed_at")),
+                record.get("inventory_batch_record_id"),
+                record.get("match_number"),
+                record.get("mapping_status"),
+                record.get("rejection_reason"),
+                parse_time(record.get("official_kickoff_at")),
+                record.get("official_home_name"),
+                record.get("official_away_name"),
+                record.get("source_fixture_identity_record_id"),
+            ),
+        )
+        return
+
+    if record_type == "SportteryResultObservation":
+        connection.execute(
+            """
+            INSERT INTO football.sporttery_result_observations (
+                record_id, fixture_id, sporttery_match_id, observed_at,
+                home_goals, away_goals, status_text, result_status_text,
+                is_cancel, scope, inventory_batch_record_id, scope_evidence_record_id,
+                fixture_link_record_id, inventory_sha256, head_sha256,
+                fixed_bonus_sha256, source_urls, raw_summary
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
             ) ON CONFLICT (record_id) DO NOTHING
             """,
             (
                 record_id,
                 fixture_id,
+                record.get("sporttery_match_id"),
                 parse_time(record.get("observed_at")),
-                parse_time(record.get("kickoff_at")),
                 record.get("home_goals"),
                 record.get("away_goals"),
-                record.get("half_time_score_raw"),
-                record.get("status_raw"),
-                record.get("status_code"),
+                record.get("status_text"),
+                record.get("result_status_text"),
+                record.get("is_cancel"),
                 record.get("scope"),
-                record.get("completed_page_sha256"),
-                record.get("live_page_sha256"),
-                record.get("analysis_page_sha256"),
-                record.get("analysis_consistency"),
+                record.get("inventory_batch_record_id"),
+                record.get("scope_evidence_record_id"),
+                record.get("fixture_link_record_id"),
+                record.get("inventory_sha256"),
+                record.get("head_sha256"),
+                record.get("fixed_bonus_sha256"),
                 Jsonb(record.get("source_urls") or []),
+                Jsonb(record.get("raw_summary") or {}),
             ),
         )
         return

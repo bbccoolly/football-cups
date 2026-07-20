@@ -75,6 +75,12 @@
 - [x] 完成 2026-07-15 至 2026-07-20 赛果补偿：新增 15 条候选和 14 条已验证赛果；`ResultCandidate=54`、`VerifiedResult=34`、`current_verified_results=34`、`unsupported_records=0`。
 - [x] 记录 D-025，将 fixture `1358414` 按中国体彩人工核验证据追加标记为无效场次；取消4个待执行赛果任务，保留全部事实并从覆盖分母、模型资格和阶段门禁中排除。
 - [x] 无效场次改动通过107项全量离线测试；迁移008已在主库应用，幂等复查返回 `unchanged`，`health=ok` 且采集与数据库任务继续正常运行。
+- [x] 记录 D-026，并实现中国体彩官方 90 分钟赛果证据层：官方 scope、清单批次、fixture 精确映射、head/fixed 详情一致性、官方候选和自动 `VerifiedResult`。
+- [x] 新增 `reconcile-results --source sporttery --dry-run/--apply`、`sporttery-smoke`、`audit-result-evidence`、数据库迁移009和 importer 类型分派；相关解析、映射和 typed insert 测试通过。
+- [x] 安装 Playwright 1.61 并验证系统 Microsoft Edge headless 可启动；真实官方页面 scope 文本可见并已保存原始字节和哈希。
+- [x] 记录 D-027，将体彩官方补偿按24小时节流接入 `run-once`；567/CORS/不完整清单改为来源失败，且不影响500主采集退出码。
+- [x] 完成指定 fixture smoke、官方证据引用审计、历史无乱码 `FixtureIdentity` 溯源和迁移010；主库重复导入新增0且 `unsupported_records=0`。
+- [x] 体彩官方证据改动通过120项全量测试，包含真实PostgreSQL迁移006中途导入、升级至010、官方typed insert、重复导入和空库重放；`git diff --check`与密钥扫描通过。
 
 ## 当前目标
 
@@ -84,16 +90,18 @@
 
 ## 当前运行证据
 
-截至 2026-07-20 10:13:17 Asia/Shanghai：
+截至 2026-07-20 12:15:33 Asia/Shanghai：
 
-- 本地增强 `health=ok`：最后心跳年龄约15秒，完整发现年龄约22分钟，SQLite `quick_check=ok`，0个逾期任务，60个未来待办；每日和每周G盘备份均为 `ok`。
+- 本地增强 `health=ok`：最后心跳年龄约31秒，完整发现和时钟检查年龄约16分钟，SQLite `quick_check=ok`，0个逾期任务，58个未来待办；每日和每周G盘备份均为 `ok`。
 - 当日日报运行326次且全部成功；完整发现成功率100%，HTTP成功率100%，解析成功率100%，24小时候选赛果覆盖率100%，已验证赛果覆盖率88.8889%，未解决赛果0，赛果冲突0。
-- 数据库导入检查点为60个文件、179,374行；主库 `records=179,374`、`collection_manifests=613`、`quality_events=10,671`、`ResultCandidate=54`、`VerifiedResult=34`、`current_invalid_fixtures=1`、`unsupported_records=0`。
+- 数据库导入检查点为69个文件、180,488行；主库 `records=180,488`、`collection_manifests=622`、`quality_events=10,831`、`ResultCandidate=54`、`VerifiedResult=34`、`current_invalid_fixtures=1`、`unsupported_records=0`。
 - 开球超过 24 小时的原36场中，fixture `1358414` 已作为无效场次剥离；剩余35场有效分母中28场已有唯一有效已验证赛果，7场有候选但因欧战/世界杯口径可能包含加时继续自动隔离，不再存在完全缺候选的有效场次。
 - 赛果补偿过程无 HTTP 程序失败、无比分冲突。新增验证方法分布为：`500-two-page-regular-time-competition=30`，`500-analysis-pair-regular-time-competition=4`。
 - 阶段 4 严格快照加已验证赛果计数：`T-24h=23`、`T-12h=25`、`T-6h=33`、`T-60m=33`、`T-10m=33`；距离各切点 500 场门槛仍很远。
 - fixture `1358414` 在四个500端点持续缺失或显示 `VS`，后经项目负责人在中国体彩竞彩足球赛果页核验为无效场次。10:00 Asia/Shanghai 执行幂等 `invalidate-fixture`，追加1条 `fixture_invalidated/excluded` 证据并取消4个待执行任务；重复执行返回 `unchanged`。
-- 中国体育彩票 `getMatchResultV1.qry` 赛果接口经命令行和真实浏览器核验均被站点 WAF/EdgeOne 拦截，不能作为当前稳定自动证据源；在能够保存原始响应、稳定匹配 fixture 并证明 90 分钟口径前，不接入正式赛果闭环。
+- 中国体彩官方页面通过标准 headless Edge 能看到“全场比分（90分钟）包含伤停补时阶段”，但页面自身的 `getUniformMatchResultV1` XHR 以及标准浏览器直接访问均返回 EdgeOne 567/CORS；`getMatchHeadV1` 同样567，`getFixedBonusV1` 当前仍为200。不能在缺少完整清单和双详情一致性时写入官方比分。
+- 首次低频自动 `--apply` 处理7场歧义 fixture，保存3条 scope、3条不完整清单和7条失败映射证据，0条官方观察、0条官方候选、0条新增验证。修正后指定 fixture `1359167` smoke 返回 `partial/failure=1`；审计为 `warning`，明确报告3个不完整清单、7个非 accepted link和0个官方已验证赛果。
+- 主库已应用迁移009/010；`sporttery_scope_evidence=3`、`sporttery_inventory_batches=3`、`sporttery_fixture_links=7`、`sporttery_result_observations=0`。第二次导入新增0，现有34条已验证赛果未变化。下次自动官方补偿为2026-07-21 11:57 Asia/Shanghai。
 
 截至 2026-07-17 18:02 Asia/Shanghai 的盘口 V2 上线证据：
 
@@ -180,7 +188,7 @@
 - ECS smoke 健康状态为 `warning`，唯一原因是隔离环境未执行正式 `run-once`，因而没有心跳；这不等于正式运行健康验收通过。
 - 备份代码、S4U 任务和真实任务批次恢复均已完成；后续必须持续检查备份年龄，并完成注销及重启验证。
 - HTML 日期直播页按当前竞彩清单工作；清单切换后使用同源 Full 数据流补偿。前瞻任务和最多 7 天自动补偿仍必须用真实覆盖率验证，修复后取得的旧结果不能倒填为 24 小时成功。
-- 杯赛及赛事格式未知的比分自动隔离，不能自动视为 90 分钟赛果，也不创建人工确认待办。直播源遗漏时，只有 `shuju` 与 `ouzhi` 双端点比分一致且赛事 ID 登记为 `regular_time_only`，才允许自动补偿验证。
+- 杯赛及赛事格式未知的比分自动隔离，不能自动视为 90 分钟赛果，也不创建人工确认待办。中国体彩 scope 浏览器证据已通过，但官方清单和 head API 当前被 EdgeOne 567 阻断；系统每日低频自动重试并保存失败证据，禁止代理、stealth、Cookie/Token 重放、验证码处理或手工补写比分。首次完整官方成功前，官方来源子窗口不能起算。
 - 广泛赛事可能来源缺盘；必须与程序失败分开统计。
 - 首批 10 场中有 1 场亚盘、大小球和让球指数导出持续返回 HTTP 500；已保留欧赔和失败证据并标记 `partial`。
 
@@ -202,7 +210,7 @@
 
 ## Agent 唯一下一步
 
-继续观察7天技术验收、30天稳定性验收和赛果覆盖率；每日检查 `result_candidate_coverage_24h` 和无效场次分类。期间继续每日3场人工核验，并完成注销 Windows 用户至少10分钟的无人值守验证。阿里云 ECS 保持所有 timer 禁用。
+观察2026-07-21 11:57 Asia/Shanghai 的下一次低频体彩官方补偿：若清单和head接口恢复，则核对完整分页、精确映射、双详情比分和 `audit-result-evidence=ok`；若仍为567，则保留新的失败批次并继续每日节流，不扩大访问频率或放宽90分钟门槛。同时继续7天技术验收、30天稳定性验收和赛果覆盖率；阿里云 ECS 保持所有 timer 禁用。
 
 ## 恢复工作时首先执行
 

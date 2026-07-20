@@ -23,6 +23,7 @@ from .config import CollectorConfig
 from .reporting import write_daily_report, write_window_report
 from .reparse import audit_market_data, collect_market_reparse, publish_market_reparse
 from .service import CollectorService, rebuild_state
+from .sporttery import audit_sporttery_evidence
 from .state import StateStore
 from .storage import DataStore, SingleInstanceLock, json_dumps, make_run_id
 from .timeutil import parse_iso, utc_now
@@ -64,7 +65,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "rebuild-state",
         "health",
         "smoke-live",
+        "sporttery-smoke",
         "reconcile-results",
+        "audit-result-evidence",
         "audit-market-data",
         "reparse-markets",
         "invalidate-fixture",
@@ -83,9 +86,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             subparser.add_argument("--active-fixture-id", required=True)
             subparser.add_argument("--completed-fixture-id", required=True)
             subparser.add_argument("--completed-kickoff", help="RFC3339 kickoff; defaults to state or now")
+        if name == "sporttery-smoke":
+            subparser.add_argument("--fixture-id", required=True)
+            subparser.add_argument("--since", required=True, help="RFC3339 inclusive kickoff start")
+            subparser.add_argument("--until", required=True, help="RFC3339 exclusive kickoff end")
+        if name == "audit-result-evidence":
+            subparser.add_argument("--fixture-id")
         if name == "reconcile-results":
             subparser.add_argument("--since", required=True, help="RFC3339 inclusive kickoff start")
             subparser.add_argument("--until", required=True, help="RFC3339 exclusive kickoff end")
+            subparser.add_argument("--source", choices=("500", "sporttery"), default="500")
+            mode = subparser.add_mutually_exclusive_group()
+            mode.add_argument("--dry-run", action="store_true")
+            mode.add_argument("--apply", action="store_true")
         if name == "reparse-markets":
             subparser.add_argument("--since", required=True, help="RFC3339 inclusive capture start")
             subparser.add_argument("--until", required=True, help="RFC3339 exclusive capture end")
@@ -466,12 +479,43 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(json_dumps(result, indent=2))
                 return code
+            if args.command == "sporttery-smoke":
+                fixture_id = str(args.fixture_id)
+                if not fixture_id.isdigit():
+                    print(json_dumps({"status": "invalid", "error": "fixture-id must be numeric"}, indent=2))
+                    return 2
+                start = parse_iso(args.since)
+                end = parse_iso(args.until)
+                result = service.reconcile_results(
+                    start,
+                    end,
+                    source="sporttery",
+                    apply=False,
+                    fixture_ids={fixture_id},
+                )
+                result["fixture_id"] = fixture_id
+                print(json_dumps(result, indent=2))
+                passed = (
+                    result.get("status") == "completed"
+                    and result.get("fixtures_queued") == 1
+                    and result.get("counts", {}).get("verified") == 1
+                )
+                return 0 if passed else 1
             if args.command == "reconcile-results":
                 start = parse_iso(args.since)
                 end = parse_iso(args.until)
-                result = service.reconcile_results(start, end)
+                apply = True if args.apply or not args.dry_run else False
+                result = service.reconcile_results(start, end, source=args.source, apply=apply)
                 print(json_dumps(result, indent=2))
                 return 0 if not result["counts"].get("failure") else 1
+            if args.command == "audit-result-evidence":
+                fixture_id = str(args.fixture_id) if args.fixture_id else None
+                if fixture_id is not None and not fixture_id.isdigit():
+                    print(json_dumps({"status": "invalid", "error": "fixture-id must be numeric"}, indent=2))
+                    return 2
+                result = audit_sporttery_evidence(config.data_dir, fixture_id=fixture_id)
+                print(json_dumps(result, indent=2))
+                return {"ok": 0, "warning": 1, "failed": 3}[result["status"]]
             if args.command == "invalidate-fixture":
                 try:
                     result = service.invalidate_fixture(

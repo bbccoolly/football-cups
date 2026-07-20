@@ -35,6 +35,27 @@ from .results import (
 )
 from .state import StateStore
 from .storage import DataStore, json_dumps, make_run_id, stable_record_id
+from .sporttery import (
+    SPORTTERY_RESULT_PAGE_URL,
+    SportteryEvidenceError,
+    accepted_mapping,
+    detail_consistent_with_mapping,
+    inventory_total_pages,
+    is_sporttery_blocked,
+    load_mapping_identities,
+    mapping_identity_valid,
+    make_fixture_link,
+    make_inventory_batch,
+    make_official_candidate,
+    make_result_observation,
+    make_scope_evidence,
+    official_scope_present,
+    parse_detail,
+    parse_inventory,
+    sporttery_fixed_bonus_url,
+    sporttery_head_url,
+    sporttery_inventory_url,
+)
 from .timeutil import iso_utc, parse_http_date, parse_iso, utc_now
 
 
@@ -1150,7 +1171,492 @@ class CollectorService:
         self.data.write_manifest("results", manifest["run_id"], manifest, finished)
         return counts
 
-    def reconcile_results(self, start: datetime, end: datetime) -> dict[str, Any]:
+    def _write_normalized_if_claimed(
+        self, record: dict[str, Any], stream: str, observed_at: datetime, *, apply: bool
+    ) -> bool:
+        if not apply:
+            return False
+        if self.state.claim_record(record["record_id"], record["record_type"], observed_at):
+            self.data.append_normalized(stream, record, observed_at)
+            return True
+        return False
+
+    def _fetch_sporttery_inventory(
+        self,
+        begin_date: str,
+        end_date: str,
+        *,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        run_id = make_run_id()
+        rows = []
+        raw_blobs = []
+        page_payloads = []
+        page_no = 1
+        total_pages = 1
+        complete = True
+        failure_reason: str | None = None
+        while page_no <= total_pages:
+            url = sporttery_inventory_url(
+                begin_date, end_date, page_no=page_no, page_size=page_size
+            )
+            response = self.http.request("GET", url)
+            blob = self.data.store_response(response, default_extension="json")
+            raw_blobs.append(blob)
+            blocked = is_sporttery_blocked(response.content)
+            self._observe_http(blob, context="sporttery:inventory", content_valid=not blocked)
+            if not response.ok or blocked:
+                complete = False
+                failure_reason = (
+                    "blocked_response" if blocked else f"http_status_{response.status_code}"
+                )
+                break
+            try:
+                page_rows = parse_inventory(response.content)
+                payload = json.loads(response.content.decode("utf-8-sig"))
+                page_payloads.append(payload)
+            except (SportteryEvidenceError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                complete = False
+                failure_reason = getattr(exc, "code", "parser_failure")
+                break
+            rows.extend(page_rows)
+            if page_no == 1:
+                total_pages = inventory_total_pages(page_payloads[0], default=1)
+            page_no += 1
+        observed = max((parse_iso(blob["observed_at"]) for blob in raw_blobs), default=utc_now())
+        batch = make_inventory_batch(
+            run_id=run_id,
+            observed_at=observed,
+            begin_date=begin_date,
+            end_date=end_date,
+            page_size=page_size,
+            page_count=len(raw_blobs),
+            rows=rows,
+            raw_blobs=raw_blobs,
+            complete=complete and len(raw_blobs) == total_pages,
+            failure_reason=failure_reason,
+        )
+        return {
+            "batch": batch,
+            "rows": rows,
+            "raw_blobs": raw_blobs,
+            "inventory_blob": raw_blobs[0] if raw_blobs else None,
+            "failure_reason": failure_reason,
+        }
+
+    def _fetch_sporttery_scope(self) -> tuple[dict[str, Any] | None, datetime | None]:
+        response = self.http.request("GET", SPORTTERY_RESULT_PAGE_URL)
+        blob = self.data.store_response(response, default_extension="html")
+        accepted = response.ok and official_scope_present(response.content)
+        self._observe_http(blob, context="sporttery:scope-page", content_valid=accepted)
+        if accepted:
+            return blob, response.response_received_at
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None, response.response_received_at
+        started = utc_now()
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(channel="msedge", headless=True)
+                try:
+                    page = browser.new_page(
+                        locale="zh-CN",
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+                        ),
+                    )
+                    page.goto(SPORTTERY_RESULT_PAGE_URL, wait_until="networkidle", timeout=30000)
+                    content = page.content().encode("utf-8")
+                finally:
+                    browser.close()
+        except PlaywrightError:
+            return None, response.response_received_at
+        observed = utc_now()
+        browser_response = ObservedResponse(
+            method="GET",
+            url=SPORTTERY_RESULT_PAGE_URL,
+            status_code=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=content,
+            request_started_at=started,
+            response_received_at=observed,
+            source_encoding="utf-8",
+        )
+        browser_blob = self.data.store_response(browser_response, default_extension="html")
+        browser_accepted = official_scope_present(content)
+        self._observe_http(
+            browser_blob,
+            context="sporttery:scope-page-browser",
+            content_valid=browser_accepted,
+        )
+        return (browser_blob if browser_accepted else None), observed
+
+    def _fetch_sporttery_detail(
+        self, sporttery_match_id: str
+    ) -> tuple[Any, dict[str, Any], dict[str, Any], datetime]:
+        head_response = self.http.request("GET", sporttery_head_url(sporttery_match_id))
+        head_blob = self.data.store_response(head_response, default_extension="json")
+        self._observe_http(
+            head_blob,
+            context="sporttery:head",
+            content_valid=head_response.ok and not is_sporttery_blocked(head_response.content),
+        )
+        fixed_response = self.http.request("GET", sporttery_fixed_bonus_url(sporttery_match_id))
+        fixed_blob = self.data.store_response(fixed_response, default_extension="json")
+        self._observe_http(
+            fixed_blob,
+            context="sporttery:fixed-bonus",
+            content_valid=fixed_response.ok and not is_sporttery_blocked(fixed_response.content),
+        )
+        if not head_response.ok or not fixed_response.ok:
+            raise SportteryEvidenceError("detail_http_failure", "official detail HTTP failed")
+        detail = parse_detail(head_response.content, fixed_response.content)
+        observed = max(head_response.response_received_at, fixed_response.response_received_at)
+        return detail, head_blob, fixed_blob, observed
+
+    def reconcile_sporttery_results(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        apply: bool,
+        fixture_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        if end <= start:
+            raise ValueError("until must be after since")
+        requested_at = utc_now()
+        candidates = existing_result_records(self.config.data_dir, "candidates")
+        verified = existing_result_records(self.config.data_dir, "verified")
+        verified_scores: dict[str, tuple[int, int]] = {}
+        for record in verified:
+            try:
+                verified_scores[str(record["fixture_id"])] = (
+                    int(record["home_goals"]),
+                    int(record["away_goals"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        candidate_scores: dict[str, set[tuple[int, int]]] = defaultdict(set)
+        for record in candidates:
+            try:
+                candidate_scores[str(record["fixture_id"])].add(
+                    (int(record["home_goals"]), int(record["away_goals"]))
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        fixtures = []
+        grouped_dates: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for fixture in self.state.all_fixtures():
+            kickoff_text = fixture.get("kickoff_at")
+            fixture_id = str(fixture["fixture_id"])
+            if fixture_ids is not None and fixture_id not in fixture_ids:
+                continue
+            if not kickoff_text or self.state.is_fixture_invalidated(fixture_id):
+                continue
+            kickoff = parse_iso(kickoff_text)
+            if not (start <= kickoff < end) or kickoff > requested_at:
+                continue
+            if fixture_id in verified_scores:
+                continue
+            fixtures.append(fixture)
+            date_key = kickoff.astimezone(ZoneInfo(self.config.timezone_name)).date().isoformat()
+            grouped_dates[date_key].append(fixture)
+
+        counts: dict[str, int] = defaultdict(int)
+        written_records: list[str] = []
+        if not fixtures:
+            return {
+                "status": "completed",
+                "source": "sporttery",
+                "apply": apply,
+                "start": iso_utc(start),
+                "end": iso_utc(end),
+                "fixtures_queued": 0,
+                "requested_fixture_ids": sorted(fixture_ids) if fixture_ids is not None else None,
+                "counts": {},
+            }
+        scope_blob, scope_observed = self._fetch_sporttery_scope()
+        if scope_blob is None or scope_observed is None:
+            self.emit_quality(
+                "sporttery_scope",
+                "failure",
+                {"reason": "official 90-minute scope text was not visible"},
+                at=utc_now(),
+            )
+            return {
+                "status": "blocked",
+                "source": "sporttery",
+                "apply": apply,
+                "fixtures_queued": len(fixtures),
+                "requested_fixture_ids": sorted(fixture_ids) if fixture_ids is not None else None,
+                "counts": {"failure": 1},
+            }
+
+        manifests: list[dict[str, Any]] = []
+        identity_records = load_mapping_identities(
+            self.config.data_dir,
+            {str(fixture["fixture_id"]) for fixture in fixtures},
+        )
+        for date_key, date_fixtures in sorted(grouped_dates.items()):
+            inventory = self._fetch_sporttery_inventory(date_key, date_key)
+            batch = inventory["batch"]
+            rows = inventory["rows"]
+            inventory_blob = inventory["inventory_blob"]
+            if inventory_blob is None:
+                counts["failure"] += len(date_fixtures)
+                continue
+            self._write_normalized_if_claimed(
+                batch, "sporttery_inventory_batches", parse_iso(batch["observed_at"]), apply=apply
+            )
+            scope = make_scope_evidence(
+                observed_at=scope_observed,
+                page_blob=scope_blob,
+                batch_id=batch["record_id"],
+            )
+            self._write_normalized_if_claimed(
+                scope, "sporttery_scope_evidence", scope_observed, apply=apply
+            )
+            if not batch["complete"] and not rows:
+                for fixture in date_fixtures:
+                    fixture_id = str(fixture["fixture_id"])
+                    self.emit_quality(
+                        "sporttery_inventory",
+                        "failure",
+                        {
+                            "reason": inventory.get("failure_reason") or "inventory_incomplete",
+                            "inventory_batch_record_id": batch["record_id"],
+                            "inventory_complete": False,
+                            "apply": apply,
+                        },
+                        fixture_id=fixture_id,
+                        competition=fixture.get("competition"),
+                    )
+                    counts["failure"] += 1
+                manifests.append(
+                    {
+                        "date": date_key,
+                        "inventory_batch_record_id": batch["record_id"],
+                        "inventory_complete": False,
+                        "row_count": batch["row_count"],
+                        "failure_reason": inventory.get("failure_reason"),
+                    }
+                )
+                continue
+            if not batch["complete"]:
+                counts["failure"] += 1
+            for fixture in date_fixtures:
+                fixture_id = str(fixture["fixture_id"])
+                identity_record = identity_records.get(fixture_id)
+                state_identity = dict(fixture["identity"])
+                identity = dict(identity_record) if identity_record is not None else state_identity
+                mapping = accepted_mapping(identity, rows)
+                link = make_fixture_link(
+                    fixture_id=fixture_id,
+                    observed_at=parse_iso(batch["observed_at"]),
+                    inventory_batch_record_id=batch["record_id"],
+                    mapping=mapping,
+                    source_fixture_identity_record_id=(
+                        str(identity_record["record_id"])
+                        if identity_record is not None
+                        else None
+                    ),
+                )
+                self._write_normalized_if_claimed(
+                    link, "sporttery_fixture_links", parse_iso(link["observed_at"]), apply=apply
+                )
+                if mapping.status != "accepted" or mapping.row is None:
+                    status = "missing" if mapping.status == "missing" and batch["complete"] else "isolated"
+                    self.emit_quality(
+                        "sporttery_mapping",
+                        status,
+                        {
+                            "reason": mapping.reason,
+                            "inventory_batch_record_id": batch["record_id"],
+                            "inventory_complete": batch["complete"],
+                            "source_fixture_identity_record_id": link.get(
+                                "source_fixture_identity_record_id"
+                            ),
+                            "state_identity_valid": mapping_identity_valid(state_identity),
+                            "apply": apply,
+                        },
+                        fixture_id=fixture_id,
+                        competition=fixture.get("competition"),
+                    )
+                    counts[status] += 1
+                    continue
+                row = mapping.row
+                if row.is_cancel is True or "取消" in row.status_text or "无效" in row.status_text:
+                    self.emit_quality(
+                        "sporttery_invalid_signal",
+                        "isolated",
+                        {
+                            "sporttery_match_id": row.sporttery_match_id,
+                            "status_text": row.status_text,
+                            "is_cancel": row.is_cancel,
+                        },
+                        fixture_id=fixture_id,
+                    )
+                    counts["isolated"] += 1
+                    continue
+                try:
+                    detail, head_blob, fixed_blob, detail_observed = self._fetch_sporttery_detail(
+                        row.sporttery_match_id
+                    )
+                    if not detail_consistent_with_mapping(row, detail):
+                        raise SportteryEvidenceError("detail_identity_mismatch", "official detail identity mismatch")
+                    observed = max(parse_iso(batch["observed_at"]), detail_observed)
+                    observation = make_result_observation(
+                        fixture_id=fixture_id,
+                        observed_at=observed,
+                        link_record_id=link["record_id"],
+                        inventory_batch_record_id=batch["record_id"],
+                        scope_record_id=scope["record_id"],
+                        row=row,
+                        detail=detail,
+                        inventory_blob=inventory_blob,
+                        head_blob=head_blob,
+                        fixed_blob=fixed_blob,
+                    )
+                except (CollectorHttpError, SportteryEvidenceError) as exc:
+                    self.emit_quality(
+                        "sporttery_result_observation",
+                        "failure",
+                        {"error": str(exc), "error_code": getattr(exc, "code", type(exc).__name__)},
+                        fixture_id=fixture_id,
+                    )
+                    counts["failure"] += 1
+                    continue
+
+                score = (int(observation["home_goals"]), int(observation["away_goals"]))
+                prior_verified_score = verified_scores.get(fixture_id)
+                if prior_verified_score is not None and prior_verified_score != score:
+                    self.emit_quality(
+                        "result_conflict",
+                        "failure",
+                        {
+                            "reason": "official 90-minute score conflicts with an accepted verified result",
+                            "official_score": list(score),
+                            "verified_score": list(prior_verified_score),
+                        },
+                        at=observed,
+                        fixture_id=fixture_id,
+                    )
+                    counts["conflict"] += 1
+                    continue
+                for prior_score in candidate_scores.get(fixture_id, set()):
+                    if prior_score != score:
+                        self.emit_quality(
+                            "result_scope_difference",
+                            "isolated",
+                            {
+                                "reason": "unconfirmed-scope candidate differs from official 90-minute score",
+                                "official_score": list(score),
+                                "candidate_score": list(prior_score),
+                            },
+                            at=observed,
+                            fixture_id=fixture_id,
+                        )
+
+                candidate = make_official_candidate(
+                    fixture_id=fixture_id,
+                    kickoff_at=fixture.get("kickoff_at"),
+                    observed_at=observed,
+                    observation=observation,
+                )
+                verified_record = make_verified_result(
+                    fixture_id=fixture_id,
+                    home_goals=score[0],
+                    away_goals=score[1],
+                    source_url=SPORTTERY_RESULT_PAGE_URL,
+                    confirmed_at=observed,
+                    method="sporttery-official-90-minute",
+                    notes="official Sporttery result page scope plus head/fixed bonus consistency",
+                    candidate_id=candidate["record_id"],
+                )
+                if apply:
+                    for record, stream in (
+                        (observation, "sporttery_result_observations"),
+                        (candidate, "result_candidates"),
+                        (verified_record, "verified_results"),
+                    ):
+                        wrote = self._write_normalized_if_claimed(record, stream, observed, apply=True)
+                        if wrote:
+                            written_records.append(record["record_id"])
+                    self.data.write_result("candidates", candidate, observed)
+                    self.data.write_result("verified", verified_record, observed)
+                    self.emit_quality(
+                        "verified_result",
+                        "accepted",
+                        {
+                            "record_id": verified_record["record_id"],
+                            "method": "sporttery-official-90-minute",
+                            "sporttery_result_observation_id": observation["record_id"],
+                        },
+                        at=observed,
+                        fixture_id=fixture_id,
+                        competition=fixture.get("competition"),
+                    )
+                counts["candidate"] += 1
+                counts["verified"] += 1
+                verified_scores[fixture_id] = score
+            manifests.append(
+                {
+                    "date": date_key,
+                    "inventory_batch_record_id": batch["record_id"],
+                    "inventory_complete": batch["complete"],
+                    "row_count": batch["row_count"],
+                    "failure_reason": inventory.get("failure_reason"),
+                }
+            )
+
+        finished = utc_now()
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "record_type": "SportteryResultReconciliationManifest",
+            "run_id": make_run_id(finished),
+            "source": "sporttery",
+            "apply": apply,
+            "started_at": iso_utc(requested_at),
+            "finished_at": iso_utc(finished),
+            "start": iso_utc(start),
+            "end": iso_utc(end),
+            "fixtures_queued": len(fixtures),
+            "inventory_batches": manifests,
+            "written_records": written_records,
+            "counts": dict(counts),
+        }
+        self.data.write_manifest("sporttery-results", manifest["run_id"], manifest, finished)
+        return {
+            "status": "partial" if counts.get("failure") else "completed",
+            "source": "sporttery",
+            "apply": apply,
+            "start": iso_utc(start),
+            "end": iso_utc(end),
+            "fixtures_queued": len(fixtures),
+            "requested_fixture_ids": sorted(fixture_ids) if fixture_ids is not None else None,
+            "counts": dict(counts),
+        }
+
+    def reconcile_results(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        source: str = "500",
+        apply: bool = True,
+        fixture_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        if source == "sporttery":
+            return self.reconcile_sporttery_results(
+                start,
+                end,
+                apply=apply,
+                fixture_ids=fixture_ids,
+            )
         if end <= start:
             raise ValueError("until must be after since")
         candidates = existing_result_records(self.config.data_dir, "candidates")
@@ -1199,12 +1705,56 @@ class CollectorService:
             "counts": dict(totals),
         }
 
+    def _scheduled_sporttery_reconciliation(self, now: datetime) -> dict[str, Any]:
+        if not self.config.sporttery_reconcile_enabled:
+            return {"status": "disabled"}
+        last_attempt_text = self.state.get_meta("last_sporttery_reconcile_attempt_at")
+        if last_attempt_text:
+            next_attempt = parse_iso(last_attempt_text) + timedelta(
+                hours=self.config.sporttery_reconcile_interval_hours
+            )
+            if now < next_attempt:
+                return {"status": "not_due", "next_attempt_at": iso_utc(next_attempt)}
+
+        self.state.set_meta("last_sporttery_reconcile_attempt_at", iso_utc(now))
+        end = now - timedelta(hours=self.config.sporttery_reconcile_minimum_age_hours)
+        start = now - timedelta(days=self.config.sporttery_reconcile_lookback_days)
+        try:
+            result = self.reconcile_sporttery_results(start, end, apply=True)
+        except (CollectorHttpError, OSError, SportteryEvidenceError) as exc:
+            result = {
+                "status": "failed",
+                "source": "sporttery",
+                "apply": True,
+                "start": iso_utc(start),
+                "end": iso_utc(end),
+                "fixtures_queued": 0,
+                "counts": {"failure": 1},
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        status = "success" if result.get("status") == "completed" else "failure"
+        if status == "success":
+            self.state.set_meta("last_sporttery_reconcile_success_at", iso_utc(utc_now()))
+        self.emit_quality(
+            "sporttery_scheduled_reconciliation",
+            status,
+            result,
+            at=utc_now(),
+        )
+        return result
+
     def run_once(self, *, now: datetime | None = None) -> tuple[int, dict[str, Any]]:
         started = now or utc_now()
         run_id = make_run_id(started)
         self.state.start_run(run_id, "run_once", started)
         deadline = time.monotonic() + self.config.run_time_budget_seconds
-        details: dict[str, Any] = {"run_id": run_id, "discovery": None, "market_jobs": {}, "results": {}}
+        details: dict[str, Any] = {
+            "run_id": run_id,
+            "discovery": None,
+            "market_jobs": {},
+            "results": {},
+            "sporttery_results": None,
+        }
         exit_code = 0
         try:
             disk_status = self._disk_status()
@@ -1229,6 +1779,11 @@ class CollectorService:
                 details["results"] = self._process_result_jobs(result_jobs)
                 if details["results"].get("failure"):
                     exit_code = 1
+
+            if time.monotonic() + 30 < deadline:
+                details["sporttery_results"] = self._scheduled_sporttery_reconciliation(
+                    utc_now()
+                )
 
             heartbeat = utc_now()
             self.state.set_meta("last_heartbeat_at", iso_utc(heartbeat))

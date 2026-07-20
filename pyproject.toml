@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+browser = ["playwright>=1.45"]
 
 [project.scripts]
 football-cups-collector = "football_cups.collector.cli:main"

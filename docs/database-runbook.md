@@ -1,6 +1,6 @@
 # PostgreSQL 数据库运行手册
 
-> 版本：V1.7
+> 版本：V1.8
 > 更新日期：2026-07-20
 
 ## 1. 本地运行方式
@@ -52,9 +52,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 .\.venv\Scripts\football-cups-db.exe init --workspace . --target-version 007
 ```
 
-数据库已高于指定目标时会拒绝回退。已经应用的 006/007/008 不得修改；问题必须使用新迁移修正。迁移 008 为无效 fixture 建立逻辑排除视图，当前主库已应用 008，日常导入不再传 `--target-version`。
+数据库已高于指定目标时会拒绝回退。已经应用的 006/007/008/009/010 不得修改；问题必须使用新迁移修正。迁移 008 为无效 fixture 建立逻辑排除视图，迁移 009 为中国体彩官方 90 分钟赛果增加证据表和候选引用字段，迁移010增加不完整清单失败原因和映射身份记录引用，日常导入不再传 `--target-version`。
 
-`status` 额外返回 `current_verified_results`、`current_invalid_fixtures`、`strict_fixture_results_by_cutoff` 和 `model_eligible_snapshots_by_cutoff`。无效 fixture 不进入当前已验证赛果、严格赛果或模型合格快照计数；按切点统计时不能把同场多个切点相加作为阶段 4 的 500 场门禁。
+`status` 额外返回 `current_verified_results`、`current_invalid_fixtures`、四张 `sporttery_*` 官方证据表、`strict_fixture_results_by_cutoff` 和 `model_eligible_snapshots_by_cutoff`。无效 fixture 不进入当前已验证赛果、严格赛果或模型合格快照计数；按切点统计时不能把同场多个切点相加作为阶段 4 的 500 场门禁。
+
+官方赛果证据导入后可查询 `sporttery_inventory_batches`、`sporttery_fixture_links`、`sporttery_result_observations`、`current_sporttery_fixture_links` 和 `current_sporttery_result_observations`。`unsupported_records` 必须保持 0；官方证据不得绕过 `verified_results` 的冲突和无效 fixture 视图。
 
 研究层使用独立入口：
 

@@ -53,6 +53,17 @@ def _env_int(name: str, default: int) -> int:
     return int(value) if value else default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
 @dataclass(frozen=True)
 class CollectorConfig:
     workspace: Path
@@ -74,6 +85,10 @@ class CollectorConfig:
     health_heartbeat_max_age_minutes: int = 10
     health_discovery_max_age_minutes: int = 45
     health_clock_max_age_minutes: int = 45
+    sporttery_reconcile_enabled: bool = True
+    sporttery_reconcile_interval_hours: int = 24
+    sporttery_reconcile_minimum_age_hours: int = 24
+    sporttery_reconcile_lookback_days: int = 8
     backup_lock_wait_seconds: int = 300
     backup_lock_poll_seconds: float = 5.0
     backup_warning_max_age_hours: float = 26.0
@@ -99,6 +114,14 @@ class CollectorConfig:
             self.health_clock_max_age_minutes,
         ) <= 0:
             raise ValueError("health age thresholds must be positive")
+        if min(
+            self.sporttery_reconcile_interval_hours,
+            self.sporttery_reconcile_minimum_age_hours,
+            self.sporttery_reconcile_lookback_days,
+        ) <= 0:
+            raise ValueError("Sporttery reconciliation timing values must be positive")
+        if self.sporttery_reconcile_lookback_days * 24 <= self.sporttery_reconcile_minimum_age_hours:
+            raise ValueError("Sporttery reconciliation lookback must exceed minimum age")
         if self.backup_lock_wait_seconds < 0 or self.backup_lock_poll_seconds <= 0:
             raise ValueError("backup lock timing values are invalid")
         if min(
@@ -146,6 +169,18 @@ class CollectorConfig:
             ),
             health_clock_max_age_minutes=_env_int(
                 "COLLECTOR_HEALTH_CLOCK_MAX_AGE_MINUTES", 45
+            ),
+            sporttery_reconcile_enabled=_env_bool(
+                "COLLECTOR_SPORTTERY_RECONCILE_ENABLED", True
+            ),
+            sporttery_reconcile_interval_hours=_env_int(
+                "COLLECTOR_SPORTTERY_RECONCILE_INTERVAL_HOURS", 24
+            ),
+            sporttery_reconcile_minimum_age_hours=_env_int(
+                "COLLECTOR_SPORTTERY_RECONCILE_MINIMUM_AGE_HOURS", 24
+            ),
+            sporttery_reconcile_lookback_days=_env_int(
+                "COLLECTOR_SPORTTERY_RECONCILE_LOOKBACK_DAYS", 8
             ),
             backup_lock_wait_seconds=_env_int("COLLECTOR_BACKUP_LOCK_WAIT_SECONDS", 300),
             backup_lock_poll_seconds=_env_float("COLLECTOR_BACKUP_LOCK_POLL_SECONDS", 5.0),

@@ -1,13 +1,13 @@
 # 500 足球竞彩采集器规范
 
-> 版本：V1.6
+> 版本：V1.7
 > 更新日期：2026-07-20
 
 ## 1. 来源与采集范围
 
 竞彩发现取以下页面 fixture ID 并集：默认页以及 `playid=269`、`312`、`271`、`270`、`272` 的 `g=2` 页面。任何包含数字型 `data-fixtureid` 的比赛都进入原始层，不按赛事、显示、销售或玩法状态过滤。
 
-每场市场包括 `ouzhi`、`yazhi`、`daxiao`、`rangqiu`。赛果候选优先来自按开球北京时间生成的 `https://live.500.com/?e=YYYYMMDD` 日期直播页；HTML 清单切换后使用页面自身加载的 `jczq/<UTC-date>Full.txt` 同源数据流回退。`shuju-<fixture_id>` 分析页通常只提供一致性证据；当直播源遗漏 fixture 时，`shuju` 与 `ouzhi` 两个分析端点比分一致可作为补偿候选证据。采集器不抓取新闻、伤停、阵容、天气或推荐内容。
+每场市场包括 `ouzhi`、`yazhi`、`daxiao`、`rangqiu`。赛果候选优先来自按开球北京时间生成的 `https://live.500.com/?e=YYYYMMDD` 日期直播页；HTML 清单切换后使用页面自身加载的 `jczq/<UTC-date>Full.txt` 同源数据流回退。`shuju-<fixture_id>` 分析页通常只提供一致性证据；当直播源遗漏 fixture 时，`shuju` 与 `ouzhi` 两个分析端点比分一致可作为补偿候选证据。中国体彩官方竞彩足球赛果页和 `webapi.sporttery.cn` 详情接口只作为 90 分钟赛果证据源，不替代 500 的比赛发现和盘口采集。采集器不抓取新闻、伤停、阵容、天气或推荐内容。
 
 欧赔以现有 Excel 响应为主数据。亚盘、大小球和让球指数直接解析 HTML 的 `xls` 表格行，不为解析回退额外请求导出接口。HTML 解码依次采用 meta 声明、HTTP `Content-Type`、GB18030、UTF-8，来源推断只作最后候选；500 中文页不得优先选择 Latin-1。解码结果必须通过替换字符、已知乱码模式和预期表头检查。
 
@@ -25,6 +25,7 @@
 - `MarketNormalization`：每个市场快照的解析版本、来源哈希、有效公司数、盘口转换失败和接受/拒绝状态。
 - `SnapshotEligibilityAssessment`：采集资格、字段完整性、模型严格资格、逐市场统计和不合格原因。
 - `HandicapIndexRow`：让球指数三项指数、概率、返还率和 Kelly；不参与 V1 模型资格。
+- `SportteryScopeEvidence` / `SportteryInventoryBatch` / `SportteryFixtureLink` / `SportteryResultObservation`：中国体彩官方赛果 scope、清单批次、fixture 精确映射和 90 分钟比分观察。
 - `ResultCandidate` / `VerifiedResult`：候选比分与明确 90 分钟比分。
 - `QualityEvent`：所有失败、缺失、冲突、迟到、结构和时间问题。
 
@@ -101,3 +102,16 @@ football-cups-collector invalidate-fixture --workspace . --fixture-id <id> --rea
 已验证赛果冲突时拒绝覆盖，写入质量事件并阻止该比赛进入严格训练。修正只能形成带 `supersedes_record_id` 和 `correction_reason` 的新版本。兼容命令 `verify-results` 不进入正式运行或验收流程。
 
 `invalidate-fixture` 仅用于有人工来源证据的无效、取消或未结算场次。命令追加 `fixture_invalidated/excluded` 质量事件并停止该 fixture 的待执行任务；重复执行返回 `unchanged`。它不删除原始响应、manifest、JSONL 或盘口记录，也不能写入比分。
+
+中国体彩官方补偿命令为：
+
+```text
+football-cups-collector reconcile-results --workspace . --source sporttery --since <RFC3339> --until <RFC3339> --dry-run
+football-cups-collector reconcile-results --workspace . --source sporttery --since <RFC3339> --until <RFC3339> --apply
+football-cups-collector sporttery-smoke --workspace . --fixture-id <id> --since <RFC3339> --until <RFC3339>
+football-cups-collector audit-result-evidence --workspace .
+```
+
+官方自动验证必须同时满足：官方页面 scope 文本可见、清单批次完整、`match_number` 精确一致、北京时间开球误差不超过 5 分钟、主客顺序和名称精确匹配、`getMatchHeadV1` 与 `getFixedBonusV1` 比分一致且未显示取消/无效。清单分页不完整时可以处理已取得行，但不得声明映射缺失；阻断、验证码、EdgeOne 567 或详情不一致只产生失败或隔离证据。500 未确认口径候选与官方 90 分钟比分不同产生 `result_scope_difference`，但不阻止接受官方结果；明确 90 分钟来源之间冲突才产生 `result_conflict`。
+
+`run-once` 默认每 24 小时最多执行一次体彩官方补偿，只处理开球已超过 24 小时且仍未验证、位于最近 8 天内的 fixture。失败不会改变 500 主采集退出码，但必须写入独立质量事件。映射优先引用文件事实层中最近一条无乱码 `FixtureIdentity` 并保存其 `record_id`；SQLite 中被旧编码污染的身份不得用于精确映射。`audit-result-evidence` 只有在官方候选、观察、完整清单、accepted link、scope 和 `VerifiedResult` 引用链完整时返回 `ok`；只有失败尝试时返回 `warning`。

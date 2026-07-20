@@ -1,6 +1,6 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V1.9
+> 版本：V2.0
 > 更新日期：2026-07-20
 
 ## 1. 安装
@@ -12,6 +12,14 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e '.[dev]'
 .\.venv\Scripts\football-cups-collector.exe init --workspace .
 ```
+
+若需要使用中国体彩官方页面的标准 headless Edge scope 证据，额外安装浏览器依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e '.[browser]'
+```
+
+该路径使用本机 Microsoft Edge，不下载或启用 stealth、代理、Cookie 轮换或验证码处理。
 
 真实配置放入未跟踪的 `.env` 或系统环境变量。`FOOTBALL_CUPS_DATA_DIR` 为空时默认使用 `<workspace>\data\500`。
 
@@ -34,6 +42,10 @@ py -3.11 -m venv .venv
 | `COLLECTOR_HEALTH_HEARTBEAT_MAX_AGE_MINUTES` | `10` |
 | `COLLECTOR_HEALTH_DISCOVERY_MAX_AGE_MINUTES` | `45` |
 | `COLLECTOR_HEALTH_CLOCK_MAX_AGE_MINUTES` | `45` |
+| `COLLECTOR_SPORTTERY_RECONCILE_ENABLED` | `true`；是否启用每日体彩官方补偿 |
+| `COLLECTOR_SPORTTERY_RECONCILE_INTERVAL_HOURS` | `24` |
+| `COLLECTOR_SPORTTERY_RECONCILE_MINIMUM_AGE_HOURS` | `24`；只处理开球至少24小时的比赛 |
+| `COLLECTOR_SPORTTERY_RECONCILE_LOOKBACK_DAYS` | `8` |
 | `COLLECTOR_BACKUP_LOCK_WAIT_SECONDS` / `LOCK_POLL_SECONDS` | `300` / `5` |
 | `COLLECTOR_BACKUP_WARNING_MAX_AGE_HOURS` / `FAILED_MAX_AGE_HOURS` | `26` / `48` |
 | `COLLECTOR_OSS_BACKUP_WARNING_MAX_AGE_DAYS` / `FAILED_MAX_AGE_DAYS` | `8` / `15` |
@@ -94,6 +106,10 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 .\.venv\Scripts\football-cups-collector.exe backup-oss --workspace .
 .\.venv\Scripts\football-cups-collector.exe health --workspace .
 .\.venv\Scripts\football-cups-collector.exe reconcile-results --workspace . --since <RFC3339> --until <RFC3339>
+.\.venv\Scripts\football-cups-collector.exe reconcile-results --workspace . --source sporttery --since <RFC3339> --until <RFC3339> --dry-run
+.\.venv\Scripts\football-cups-collector.exe reconcile-results --workspace . --source sporttery --since <RFC3339> --until <RFC3339> --apply
+.\.venv\Scripts\football-cups-collector.exe sporttery-smoke --workspace . --fixture-id <id> --since <RFC3339> --until <RFC3339>
+.\.venv\Scripts\football-cups-collector.exe audit-result-evidence --workspace .
 .\.venv\Scripts\football-cups-collector.exe audit-market-data --workspace .
 ```
 
@@ -169,6 +185,19 @@ $env:FOOTBALL_CUPS_DATA_DIR = 'D:\football-cups-restore-test\data\500'
 ## 8. 全自动赛果闭环
 
 日期直播页确定性比分自动形成候选；HTML 清单切换后自动读取页面自身的日期 Full 数据流。普通联赛在分析页一致后自动形成已验证赛果。若直播源持续遗漏 fixture，采集器会尝试 `shuju` 与 `ouzhi` 分析端点双证据 fallback；两端比分一致且赛事 ID 登记为 `regular_time_only` 时才自动验证。可能加时、未知、身份冲突或比分冲突的比赛自动隔离，不要求人工确认，也不得进入训练。
+
+中国体彩官方源用于补充明确 90 分钟口径。先执行 `--dry-run` 核对 queued、mapping、candidate 和 verified 计数，再执行 `--apply` 写入 `SportteryScopeEvidence`、`SportteryInventoryBatch`、`SportteryFixtureLink`、`SportteryResultObservation`、官方候选和已验证赛果。官方清单分页不完整、scope 文本不可见、详情不一致或 WAF 阻断时不得自动验证。官方来源失败单独统计，不计入 500 盘口采集失败。
+
+`run-once` 已接入低频官方补偿：每天最多一次，默认扫描开球后24小时至8天且仍未验证的 fixture。`last_sporttery_reconcile_attempt_at` 记录所有尝试，只有完整成功才更新 `last_sporttery_reconcile_success_at`。EdgeOne 567、CORS 或清单不完整返回 `partial`，保存原始响应和失败原因，但不生成映射缺失或官方比分。标准 headless Edge 只用于读取官方页面 scope；不得使用代理、stealth、Cookie/Token 重放或验证码处理。
+
+证据审计：
+
+```powershell
+.\.venv\Scripts\football-cups-collector.exe audit-result-evidence --workspace .
+.\.venv\Scripts\football-cups-collector.exe audit-result-evidence --workspace . --fixture-id <id>
+```
+
+`ok` 表示至少存在一条引用完整的官方已验证赛果；`warning` 表示只有失败/不完整尝试或尚无官方已验证赛果；引用断裂、比分或 fixture 不一致返回 `failed`。数据库重复导入必须新增0，且 `status` 中四张 `sporttery_*` 证据表和 `unsupported_records` 可审计。
 
 检查日报中的以下指标：
 
