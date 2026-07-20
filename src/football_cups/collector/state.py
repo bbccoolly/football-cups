@@ -326,10 +326,13 @@ class StateStore:
     def sync_competition_formats(self, formats: dict[str, str]) -> int:
         changed = 0
         rows = self.connection.execute(
-            "SELECT fixture_id, competition, competition_format FROM fixtures"
+            "SELECT fixture_id, competition, competition_id, competition_format FROM fixtures"
         ).fetchall()
         for row in rows:
-            expected = formats.get(str(row["competition"] or ""), "unknown")
+            expected = formats.get(
+                str(row["competition"] or ""),
+                formats.get(f"id:{row['competition_id']}", "unknown"),
+            )
             if row["competition_format"] == expected:
                 continue
             self.connection.execute(

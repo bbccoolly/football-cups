@@ -111,6 +111,26 @@ def test_competition_formats_sync_existing_fixtures(tmp_path) -> None:
         assert state.sync_competition_formats({"League": "regular_time_only"}) == 0
 
 
+def test_competition_formats_sync_by_competition_id(tmp_path) -> None:
+    config = config_for(tmp_path)
+    with StateStore(config) as state:
+        identity = {
+            "fixture_id": "123",
+            "competition_name": "Mojibake",
+            "competition_id": "16",
+            "home_team_id": "10",
+            "away_team_id": "20",
+            "kickoff_at": "2026-07-16T19:00:00Z",
+        }
+        state.upsert_fixture(
+            identity,
+            datetime(2026, 7, 15, tzinfo=timezone.utc),
+            identity_conflict=False,
+        )
+        assert state.sync_competition_formats({"id:16": "regular_time_only"}) == 1
+        assert state.all_fixtures()[0]["competition_format"] == "regular_time_only"
+
+
 def test_record_claim_is_idempotent(tmp_path) -> None:
     config = config_for(tmp_path)
     now = datetime.now(timezone.utc)

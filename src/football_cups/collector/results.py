@@ -236,6 +236,17 @@ def load_competition_formats(path: Path) -> dict[str, str]:
         if not name or competition_format not in COMPETITION_FORMATS:
             raise ValueError(f"invalid competition format: {raw_name!r}={raw_format!r}")
         competitions[name] = competition_format
+    raw_ids = payload.get("competition_ids", {})
+    if raw_ids is None:
+        raw_ids = {}
+    if not isinstance(raw_ids, dict):
+        raise ValueError("competition_ids must be an object when provided")
+    for raw_id, raw_format in raw_ids.items():
+        competition_id = str(raw_id).strip()
+        competition_format = str(raw_format).strip()
+        if not competition_id.isdigit() or competition_format not in COMPETITION_FORMATS:
+            raise ValueError(f"invalid competition id format: {raw_id!r}={raw_format!r}")
+        competitions[f"id:{competition_id}"] = competition_format
     return competitions
 
 

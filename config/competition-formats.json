@@ -8,5 +8,16 @@
     "欧冠": "may_have_extra_time",
     "欧罗巴": "may_have_extra_time",
     "世界杯": "may_have_extra_time"
+  },
+  "competition_ids": {
+    "5": "regular_time_only",
+    "16": "regular_time_only",
+    "40": "regular_time_only",
+    "94": "regular_time_only",
+    "109": "regular_time_only",
+    "145": "regular_time_only",
+    "63": "may_have_extra_time",
+    "101": "may_have_extra_time",
+    "110": "may_have_extra_time"
   }
 }

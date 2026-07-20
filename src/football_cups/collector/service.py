@@ -19,6 +19,7 @@ from .markets import MarketCollector
 from .reporting import write_daily_report
 from .results import (
     AnalysisScore,
+    LiveScore,
     ResultParseError,
     existing_result_records,
     import_verified_results,
@@ -696,6 +697,11 @@ class CollectorService:
             live = None
             live_response = None
             live_blob = None
+            analysis: AnalysisScore | None = None
+            analysis_blob: dict[str, Any] | None = None
+            analysis_error: str | None = None
+            observed: datetime | None = None
+            candidate_source_method = "live_and_analysis"
             parse_errors: list[ResultParseError] = []
             source_errors = [str(source["error"]) for source in (page, feed) if source.get("error")]
             if not page.get("error"):
@@ -712,6 +718,75 @@ class CollectorService:
                     live_blob = feed["blob"]
                 except ResultParseError as exc:
                     parse_errors.append(exc)
+
+            if live is None and parse_errors and all(
+                error.code in {"fixture_missing", "not_finished"} for error in parse_errors
+            ):
+                fallback_scores: list[tuple[AnalysisScore, dict[str, Any], Any]] = []
+                for suffix in ("shuju", "ouzhi"):
+                    fallback_url = f"https://odds.500.com/fenxi/{suffix}-{fixture_id}.shtml"
+                    try:
+                        response = self.http.request("GET", fallback_url)
+                        blob = self.data.store_response(response, default_extension="html")
+                        raw_blobs.append(blob)
+                        blocked = is_blocked_result_page(response.content)
+                        self._observe_http(
+                            blob,
+                            context=f"results:analysis-fallback:{suffix}",
+                            content_valid=not blocked,
+                        )
+                        page_attempts.append(
+                            {
+                                "url": fallback_url,
+                                "context": f"results:analysis-fallback:{suffix}",
+                                "status": (
+                                    "success"
+                                    if response.ok and not blocked
+                                    else "failure"
+                                ),
+                                "raw_blob": blob,
+                                "error": None if response.ok and not blocked else "source unavailable",
+                            }
+                        )
+                        if response.ok and not blocked:
+                            parsed = parse_analysis_page(response.content, fixture_id)
+                            if parsed is not None:
+                                fallback_scores.append((parsed, blob, response))
+                    except CollectorHttpError as exc:
+                        page_attempts.append(
+                            {
+                                "url": fallback_url,
+                                "context": f"results:analysis-fallback:{suffix}",
+                                "status": "request_failure",
+                                "error": str(exc),
+                            }
+                        )
+                if len(fallback_scores) == 2:
+                    first, first_blob, first_response = fallback_scores[0]
+                    second, second_blob, second_response = fallback_scores[1]
+                    if (first.home_goals, first.away_goals) == (
+                        second.home_goals,
+                        second.away_goals,
+                    ):
+                        live = LiveScore(
+                            fixture_id=fixture_id,
+                            home_goals=first.home_goals,
+                            away_goals=first.away_goals,
+                            status_code="4",
+                            half_time_score_raw=None,
+                            home_name=first.home_name,
+                            away_name=first.away_name,
+                        )
+                        live_response = first_response
+                        live_blob = first_blob
+                        analysis = second
+                        analysis_blob = second_blob
+                        analysis_error = "live sources missing; shuju and ouzhi scores agree"
+                        observed = max(
+                            first_response.response_received_at,
+                            second_response.response_received_at,
+                        )
+                        candidate_source_method = "analysis_pair_fallback"
 
             if live is None and not parse_errors:
                 now = utc_now()
@@ -807,32 +882,31 @@ class CollectorService:
                 counts["conflict"] += 1
                 continue
 
-            analysis_url = f"https://odds.500.com/fenxi/shuju-{fixture_id}.shtml"
-            analysis_blob: dict[str, Any] | None = None
-            analysis: AnalysisScore | None = None
-            analysis_error: str | None = None
-            observed = live_response.response_received_at
-            try:
-                analysis_response = self.http.request("GET", analysis_url)
-                analysis_blob = self.data.store_response(analysis_response, default_extension="html")
-                raw_blobs.append(analysis_blob)
-                analysis_blocked = is_blocked_result_page(analysis_response.content)
-                self._observe_http(
-                    analysis_blob,
-                    context="results:analysis",
-                    content_valid=not analysis_blocked,
-                )
-                observed = analysis_response.response_received_at
-                if not analysis_response.ok:
-                    analysis_error = f"HTTP {analysis_response.status_code}"
-                elif analysis_blocked:
-                    analysis_error = "blocked page"
-                else:
-                    analysis = parse_analysis_page(analysis_response.content, fixture_id)
-                    if analysis is None:
-                        analysis_error = "analysis page has no matching parseable score"
-            except CollectorHttpError as exc:
-                analysis_error = str(exc)
+            if observed is None:
+                observed = live_response.response_received_at
+            if analysis_blob is None:
+                analysis_url = f"https://odds.500.com/fenxi/shuju-{fixture_id}.shtml"
+                try:
+                    analysis_response = self.http.request("GET", analysis_url)
+                    analysis_blob = self.data.store_response(analysis_response, default_extension="html")
+                    raw_blobs.append(analysis_blob)
+                    analysis_blocked = is_blocked_result_page(analysis_response.content)
+                    self._observe_http(
+                        analysis_blob,
+                        context="results:analysis",
+                        content_valid=not analysis_blocked,
+                    )
+                    observed = analysis_response.response_received_at
+                    if not analysis_response.ok:
+                        analysis_error = f"HTTP {analysis_response.status_code}"
+                    elif analysis_blocked:
+                        analysis_error = "blocked page"
+                    else:
+                        analysis = parse_analysis_page(analysis_response.content, fixture_id)
+                        if analysis is None:
+                            analysis_error = "analysis page has no matching parseable score"
+                except CollectorHttpError as exc:
+                    analysis_error = str(exc)
 
             if analysis is None:
                 consistency = "unavailable"
@@ -880,6 +954,7 @@ class CollectorService:
                     "candidate_id": candidate["record_id"],
                     "analysis_consistency": consistency,
                     "analysis_error": analysis_error,
+                    "source_method": candidate_source_method,
                     "target": target,
                 },
                 at=observed,
@@ -922,8 +997,17 @@ class CollectorService:
                             away_goals=candidate["away_goals"],
                             source_url=live_source_url,
                             confirmed_at=observed,
-                            method="500-two-page-regular-time-competition",
-                            notes="live and analysis scores agree; competition registry is regular_time_only",
+                            method=(
+                                "500-analysis-pair-regular-time-competition"
+                                if candidate_source_method == "analysis_pair_fallback"
+                                else "500-two-page-regular-time-competition"
+                            ),
+                            notes=(
+                                "shuju and ouzhi scores agree after live sources omitted fixture; "
+                                "competition registry is regular_time_only"
+                                if candidate_source_method == "analysis_pair_fallback"
+                                else "live and analysis scores agree; competition registry is regular_time_only"
+                            ),
                             candidate_id=candidate["record_id"],
                         )
                         if self.state.claim_record(verified["record_id"], "VerifiedResult", observed):

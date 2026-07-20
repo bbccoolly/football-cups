@@ -90,3 +90,17 @@ def test_gbk_page_and_second_precision_buy_end_are_decoded() -> None:
     assert parsed.errors == []
     assert parsed.fixtures[0]["home_team_name"] == "\u82f1\u683c\u5170"
     assert parsed.fixtures[0]["buy_end_at"] == "2026-07-15T14:00:00Z"
+
+
+def test_discovery_rejects_latin1_hint_for_chinese_page() -> None:
+    page = PAGE.replace(b"Home", "\u82f1\u683c\u5170".encode("gb18030"), 1)
+    parsed = parse_discovery_page(
+        page,
+        source_name="default",
+        source_url="https://example.test",
+        observed_at=datetime.now(timezone.utc),
+        timezone_name="Asia/Shanghai",
+        source_encoding="ISO-8859-1",
+    )
+    assert parsed.errors == []
+    assert parsed.fixtures[0]["home_team_name"] == "\u82f1\u683c\u5170"

@@ -15,6 +15,9 @@ from .timeutil import iso_utc, parse_source_datetime
 
 FIXTURE_PATTERN = re.compile(rb"data-fixtureid=[\"'](\d+)[\"']", re.I)
 SEASON_LINK_PATTERN = re.compile(r"/zuqiu-(\d+)/")
+META_CHARSET_PATTERN = re.compile(
+    rb"<meta[^>]+charset\s*=\s*['\"]?\s*([a-zA-Z0-9._-]+)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,48 @@ def _parse_time(date_text: str, time_text: str, timezone_name: str) -> str | Non
         return None
 
 
+def _canonical_encoding(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().strip("\"'").lower()
+    aliases = {
+        "gb2312": "gb18030",
+        "gbk": "gb18030",
+        "gb-2312": "gb18030",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _select_decoded_text(content: bytes, source_encoding: str) -> tuple[str, str]:
+    candidates: list[tuple[str, str]] = []
+    meta_match = META_CHARSET_PATTERN.search(content[:4096])
+    if meta_match:
+        meta_encoding = _canonical_encoding(meta_match.group(1).decode("ascii", errors="ignore"))
+        if meta_encoding:
+            candidates.append(("meta", meta_encoding))
+    inferred = _canonical_encoding(source_encoding)
+    if inferred and inferred not in {"iso-8859-1", "latin-1"}:
+        candidates.append(("source", inferred))
+    candidates.extend(
+        [
+            ("gb18030_fallback", "gb18030"),
+            ("utf8_fallback", "utf-8"),
+        ]
+    )
+    seen: set[str] = set()
+    for source, encoding in candidates:
+        if encoding in seen:
+            continue
+        seen.add(encoding)
+        try:
+            decoded = content.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+        if "\ufffd" not in decoded:
+            return decoded, encoding
+    return content.decode(source_encoding or "utf-8", errors="replace"), source_encoding
+
+
 def parse_discovery_page(
     content: bytes,
     *,
@@ -67,7 +112,7 @@ def parse_discovery_page(
     fixtures: list[dict[str, Any]] = []
     pools: list[dict[str, Any]] = []
     try:
-        decoded = content.decode(source_encoding, errors="replace")
+        decoded, _selected_encoding = _select_decoded_text(content, source_encoding)
         tree = html.fromstring(decoded)
     except (LookupError, etree.ParserError, ValueError) as exc:
         return ParsedDiscoveryPage(source_name, source_url, [], [], regex_ids, set(), [str(exc)])

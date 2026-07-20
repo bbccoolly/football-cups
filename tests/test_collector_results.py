@@ -11,6 +11,7 @@ from football_cups.collector.results import (
     ResultParseError,
     import_verified_results,
     is_blocked_result_page,
+    load_competition_formats,
     make_candidate,
     parse_analysis_page,
     parse_live_result,
@@ -119,6 +120,26 @@ def test_live_candidate_does_not_require_analysis(tmp_path) -> None:
     assert candidate["scope"] == "candidate-full-time-scope-not-yet-confirmed"
 
 
+def test_competition_formats_support_stable_source_ids(tmp_path) -> None:
+    path = tmp_path / "competition-formats.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "competitions": {"挪超": "regular_time_only"},
+                "competition_ids": {"16": "regular_time_only", "101": "may_have_extra_time"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    assert load_competition_formats(path) == {
+        "挪超": "regular_time_only",
+        "id:16": "regular_time_only",
+        "id:101": "may_have_extra_time",
+    }
+
+
 @pytest.mark.parametrize(
     ("competition", "competition_format", "verified_count", "isolated_count"),
     [
@@ -188,6 +209,70 @@ def test_service_auto_verifies_or_isolates_by_competition(
     assert counts["isolated"] == isolated_count
     assert len(list((config.data_dir / "results").rglob("candidates/*.json"))) == 1
     assert len(list((config.data_dir / "results").rglob("verified/*.json"))) == verified_count
+
+
+def test_service_uses_analysis_pair_fallback_when_live_sources_omit_fixture(
+    tmp_path, monkeypatch
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "competition-formats.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "competitions": {},
+                "competition_ids": {"16": "regular_time_only"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = config_for(tmp_path)
+    kickoff = datetime(2026, 7, 16, 22, tzinfo=timezone.utc)
+    observed = datetime(2026, 7, 17, 1, tzinfo=timezone.utc)
+    identity = {
+        "fixture_id": "123",
+        "competition_name": "Mojibake",
+        "competition_id": "16",
+        "home_team_id": "1",
+        "away_team_id": "2",
+        "kickoff_at": iso_utc(kickoff),
+        "buy_end_at": None,
+    }
+    with CollectorService(config) as service:
+        service.state.upsert_fixture(identity, kickoff, identity_conflict=False)
+        service.state.sync_competition_formats(service.competition_formats)
+        live_url = result_page_url(iso_utc(kickoff), config.timezone_name)
+        feed_url = result_feed_url(iso_utc(kickoff))
+        shuju_url = "https://odds.500.com/fenxi/shuju-123.shtml"
+        ouzhi_url = "https://odds.500.com/fenxi/ouzhi-123.shtml"
+
+        def fake_request(_method, url, **_kwargs):
+            if url == live_url:
+                return response(url, b"<html><body></body></html>", observed)
+            if url == feed_url:
+                return response(url, b"[]", observed)
+            if url in {shuju_url, ouzhi_url}:
+                return response(url, ANALYSIS, observed)
+            raise AssertionError(url)
+
+        monkeypatch.setattr(service.http, "request", fake_request)
+        counts = service._process_result_jobs(
+            [
+                {
+                    "job_id": "result:test",
+                    "fixture_id": "123",
+                    "target": "reconcile",
+                    "attempts": 0,
+                    "payload": {"fixture": identity, "kickoff_at": iso_utc(kickoff)},
+                }
+            ]
+        )
+
+    assert counts["candidate"] == 1
+    assert counts["verified"] == 1
+    assert len(list((config.data_dir / "results").rglob("candidates/*.json"))) == 1
+    assert len(list((config.data_dir / "results").rglob("verified/*.json"))) == 1
 
 
 def test_manual_verified_result_conflict_is_not_overwritten(tmp_path) -> None:
