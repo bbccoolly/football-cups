@@ -115,4 +115,4 @@ football-cups-collector audit-result-evidence --workspace .
 
 官方自动验证必须同时满足：官方页面 scope 文本可见、清单批次完整、`match_number` 精确一致、北京时间开球误差不超过 5 分钟、主客顺序和名称精确匹配、`getMatchHeadV1` 与 `getFixedBonusV1` 比分一致且未显示取消/无效。清单分页不完整时可以处理已取得行，但不得声明映射缺失；阻断、验证码、EdgeOne 567 或详情不一致只产生失败或隔离证据。500 未确认口径候选与官方 90 分钟比分不同产生 `result_scope_difference`，但不阻止接受官方结果；明确 90 分钟来源之间冲突才产生 `result_conflict`。
 
-`run-once` 默认每 24 小时最多执行一次体彩官方补偿，只处理开球已超过 24 小时、位于最近 8 天内且尚无自动验证证据的 fixture；已有负责人声明的 fixture 仍继续核验。失败不会改变 500 主采集退出码，但必须写入独立质量事件。映射优先引用文件事实层中最近一条无乱码 `FixtureIdentity` 并保存其 `record_id`；SQLite 中被旧编码污染的身份不得用于精确映射。`audit-result-evidence` 只有在官方候选、观察、完整清单、accepted link、scope 和 `VerifiedResult` 引用链完整时返回 `ok`；只有失败尝试时返回 `warning`。
+`run-once` 默认每24小时最多执行一次体彩官方补偿，只处理开球已超过24小时、处于8天回看窗口且尚无自动验证证据的fixture；已有负责人声明的fixture仍继续核验。失败不会改变500主采集退出码，但必须写入独立质量事件。映射优先引用文件事实层中按 `observed_at DESC, record_id DESC` 排序的第一条无乱码 `FixtureIdentity` 并保存其 `record_id`；SQLite中被旧编码污染的身份不得用于精确映射。`audit-result-evidence` 只有在官方候选、观察、完整清单、accepted link、scope和 `VerifiedResult` 引用链完整时返回 `ok`；只有失败尝试时返回 `warning`。

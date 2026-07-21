@@ -12,6 +12,8 @@
 
 当前进度及唯一下一步见 `docs/project-status.md`。隔离的公开历史研究基线和 research-only 影子预测能力已经可运行，但不属于正式阶段 4。阿里云杭州 ECS 已创建，但目前只允许隔离 smoke；数据盘、OSS 和正式切换门禁尚未完成。
 
+影子预测按D-030使用显式赛事ID分层：A/B/C级保留原始去水概率，C级最高为low，未知或分层冲突赛事abstain。分层只改变置信和风险标签，不修改概率；所有初始赛事均为provisional。
+
 ## 文档入口
 
 - `AGENTS.md`：Agent 工作规则、恢复顺序和阶段门禁
@@ -100,8 +102,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
   --activate `
   --channel research-shadow-v1
 .\.venv\Scripts\football-cups-research.exe db-import --workspace .
+.\.venv\Scripts\football-cups-research.exe shadow-predict --workspace . --channel research-shadow-v1 --dry-run
 .\.venv\Scripts\football-cups-research.exe shadow-predict --workspace . --channel research-shadow-v1
+.\.venv\Scripts\football-cups-research.exe evaluate-shadow --workspace . --channel research-shadow-v1
 ```
+
+`shadow-predict` 只在真实切点窗口追加记录；窗口外返回 `unchanged`，不能历史补发。最新影子事实位于 `data/research/normalized/shadow-predictions/`，完整赛事分层、评估和任务说明见 `docs/research-data-acquisition-plan.md`。
 
 该路线不抓取 500 历史页面，不进入正式 `football` schema，也不能替代严格前瞻验收。来源、K1 导入和访问频率规则见 `docs/research-data-acquisition-plan.md`。
 

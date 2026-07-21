@@ -38,6 +38,7 @@ coverage.xml
 # IDEs and editors
 .idea/
 .vscode/
+.workbuddy/
 *.swp
 *.swo
 *~

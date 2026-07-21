@@ -1,7 +1,7 @@
 # 500 采集器 Windows 运行手册
 
-> 版本：V2.2
-> 更新日期：2026-07-20
+> 版本：V2.3
+> 更新日期：2026-07-21
 
 ## 1. 安装
 
@@ -89,6 +89,17 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 `-Interactive` 只在当前用户保持登录时运行，不能通过 30 天验收。正式连续运行前必须卸载回退任务，并在提升的 PowerShell 中重新安装默认无人值守模式。
 
 注册后逐项手工触发并轮询到 `Ready`，确认 `LastTaskResult=0` 和新的完成 manifest。影子预测任务可能因尚未到真实发布窗口返回 `unchanged`，但不得失败。随后记录任务 `LastRunTime`，注销用户至少 10 分钟；重新登录后确认采集至少两轮、数据库至少一轮且 `health=ok`。最终还需重启一次 Windows，确认 G 盘仍属于预期物理磁盘、PostgreSQL 可由导入任务启动且心跳在 10 分钟内恢复。
+
+影子预测使用 `config/research-competition-profiles.json` 的显式赛事ID和版本化置信策略。任务只在 `T-24h`、`T-6h`、`T-60m`、`T-10m` 的真实发布窗口追加记录；窗口外返回 `unchanged`。运维检查：
+
+```powershell
+.\.venv\Scripts\football-cups-research.exe shadow-predict --workspace . --channel research-shadow-v1 --dry-run
+Get-ChildItem data\research\normalized\shadow-predictions -Recurse -Filter *.jsonl |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Get-Content
+.\.venv\Scripts\football-cups-research.exe evaluate-shadow --workspace . --channel research-shadow-v1
+```
+
+新记录必须包含截止前身份、注册表文件/canonical双哈希、赛事等级、置信和风险字段。未知或分层冲突赛事只能 abstain；迁移前记录保持 `legacy_unclassified`，不得重发。赛事分层不修改胜平负概率，也不解除正式模型门禁。
 
 卸载：
 
