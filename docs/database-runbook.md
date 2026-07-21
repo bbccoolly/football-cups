@@ -52,7 +52,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 .\.venv\Scripts\football-cups-db.exe init --workspace . --target-version 007
 ```
 
-数据库已高于指定目标时会拒绝回退。已经应用的 006/007/008/009/010/011/012 不得修改；问题必须使用新迁移修正。迁移 008 为无效 fixture 建立逻辑排除视图，迁移 009 为中国体彩官方 90 分钟赛果增加证据表和候选引用字段，迁移010增加不完整清单失败原因和映射身份记录引用，迁移011增加负责人声明字段并收紧人工结果的 current/strict 资格，迁移012增加隔离影子预测研究表和 `research_kind` 约束，日常导入不再传 `--target-version`。
+数据库已高于指定目标时会拒绝回退。已经应用的 006/007/008/009/010/011/012/013 不得修改；问题必须使用新迁移修正。迁移 008 为无效 fixture 建立逻辑排除视图，迁移 009 为中国体彩官方 90 分钟赛果增加证据表和候选引用字段，迁移010增加不完整清单失败原因和映射身份记录引用，迁移011增加负责人声明字段并收紧人工结果的 current/strict 资格，迁移012增加隔离影子预测研究表和 `research_kind` 约束，迁移013增加版本化赛事分层、as-of身份、置信与风险审计字段，日常导入不再传 `--target-version`。
 
 `status` 额外返回 `current_verified_results`、`verified_result_count_by_method`、`current_invalid_fixtures`、四张 `sporttery_*` 官方证据表、`strict_fixture_results_by_cutoff` 和 `model_eligible_snapshots_by_cutoff`。无效 fixture 和没有完整候选引用的旧人工记录不进入当前已验证赛果、严格赛果或模型合格快照计数；按切点统计时不能把同场多个切点相加作为阶段 4 的 500 场门禁。
 
@@ -67,6 +67,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 命令会应用未执行迁移、使用独立 advisory lock 和文件哈希检查点，并在导入前后比较 `football.strict_fixture_results_by_cutoff`。计数变化时立即失败。研究层可删除后从 `data/research/normalized/` 重放，但不得并入正式导入任务。
 
 影子预测同样走研究 importer。`research.model_datasets`、`model_versions`、`model_activations`、`shadow_predictions` 和评估表只服务 D-029 隔离研究；`shadow_predictions` 的发布唯一键为 `(channel, fixture_id, target, prediction_cutoff)`，重复导入必须新增0。研究导入仍不得改变正式严格切点计数。
+
+迁移013后，新影子记录必须携带 `policy_version`、注册表文件/canonical双哈希、赛事等级、截止前身份引用和可重放置信字段。旧记录保持可导入并归类为 `legacy_unclassified`。策略文件更新只影响未来发布机会，不得删除、更新或重新发布旧记录。
 
 退出码：
 

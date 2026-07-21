@@ -16,6 +16,7 @@ from football_cups.database.connection import apply_migrations, connect
 
 from . import SCHEMA_VERSION, research_flags
 from .config import ResearchConfig
+from .competition_profiles import CONFIDENCE_RANK, valid_sha256
 
 
 SUPPORTED_TYPES = frozenset(
@@ -37,6 +38,63 @@ SUPPORTED_TYPES = frozenset(
 
 class ResearchImportError(ValueError):
     pass
+
+
+class ResearchImportIntegrityError(RuntimeError):
+    pass
+
+
+def _validate_shadow_policy(record: dict[str, Any], source_file: str, line_number: int) -> None:
+    if record.get("record_type") != "ResearchShadowPrediction" or not record.get("policy_version"):
+        return
+    required = (
+        "competition_type",
+        "market_evidence_tier",
+        "evaluation_group",
+        "classification_status",
+        "registry_version",
+        "registry_file_sha256",
+        "registry_canonical_sha256",
+        "raw_confidence_label",
+        "competition_confidence_cap",
+        "confidence_label",
+        "confidence_reasons",
+        "risk_flags",
+    )
+    missing = [key for key in required if record.get(key) is None]
+    if missing:
+        raise ResearchImportIntegrityError(
+            f"{source_file}:{line_number}: incomplete shadow policy fields: {', '.join(missing)}"
+        )
+    if not valid_sha256(record["registry_file_sha256"]) or not valid_sha256(
+        record["registry_canonical_sha256"]
+    ):
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: invalid registry SHA-256")
+    raw = record.get("raw_confidence_label")
+    cap = record.get("competition_confidence_cap")
+    final = record.get("confidence_label")
+    if raw not in CONFIDENCE_RANK or cap not in CONFIDENCE_RANK or final not in CONFIDENCE_RANK:
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: invalid confidence label")
+    if CONFIDENCE_RANK[final] > min(CONFIDENCE_RANK[raw], CONFIDENCE_RANK[cap]):
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: confidence exceeds stored cap")
+    tier = record.get("market_evidence_tier")
+    if tier == "C" and CONFIDENCE_RANK[cap] > CONFIDENCE_RANK["low"]:
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: C tier cap exceeds low")
+    if tier == "D" and (
+        cap != "observation_only"
+        or final != "observation_only"
+        or record.get("status") != "abstained"
+    ):
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: D tier must abstain")
+    if (
+        record.get("classification_status") == "provisional"
+        and CONFIDENCE_RANK[final] > CONFIDENCE_RANK["medium"]
+    ):
+        raise ResearchImportIntegrityError(
+            f"{source_file}:{line_number}: provisional prediction exceeds medium"
+        )
+    if record.get("status") == "published" and not record.get("identity_record_id"):
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: published prediction lacks identity")
 
 
 @contextmanager
@@ -71,6 +129,7 @@ def _validate(record: Any, source_file: str, line_number: int) -> dict[str, Any]
             continue
         if record.get(key) != expected:
             raise ResearchImportError(f"{source_file}:{line_number}: invalid research flag {key}")
+    _validate_shadow_policy(record, source_file, line_number)
     return record
 
 
@@ -267,10 +326,21 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 published_at, status, model_key, model_version,
                 activation_record_id, selected_batch_record_id,
                 source_snapshot_record_id, market_observed_at, bookmaker_count,
-                probabilities, features, abstention_reason
+                probabilities, features, abstention_reason,
+                competition_id, competition_name, competition_type,
+                market_evidence_tier, evaluation_group, classification_status,
+                registry_version, policy_version, registry_file_sha256,
+                registry_canonical_sha256, direction_strength,
+                bookmaker_dispersion, raw_confidence_label,
+                competition_confidence_cap, confidence_label,
+                confidence_reasons, risk_flags, identity_record_id,
+                identity_observed_at, automatic_verified_fixture_count,
+                evaluation_span_days, review_eligible
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
             ) ON CONFLICT (record_id) DO NOTHING
             """,
             (
@@ -291,6 +361,28 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 Jsonb(record.get("probabilities") or {}),
                 Jsonb(record.get("features") or {}),
                 record.get("abstention_reason"),
+                record.get("competition_id"),
+                record.get("competition_name"),
+                record.get("competition_type"),
+                record.get("market_evidence_tier"),
+                record.get("evaluation_group"),
+                record.get("classification_status"),
+                record.get("registry_version"),
+                record.get("policy_version"),
+                record.get("registry_file_sha256"),
+                record.get("registry_canonical_sha256"),
+                record.get("direction_strength"),
+                record.get("bookmaker_dispersion"),
+                record.get("raw_confidence_label"),
+                record.get("competition_confidence_cap"),
+                record.get("confidence_label"),
+                Jsonb(record.get("confidence_reasons") or []),
+                Jsonb(record.get("risk_flags") or []),
+                record.get("identity_record_id"),
+                record.get("identity_observed_at"),
+                record.get("automatic_verified_fixture_count"),
+                record.get("evaluation_span_days"),
+                record.get("review_eligible"),
             ),
         )
     elif record_type in {"ResearchRetrospectiveEvaluation", "ResearchShadowEvaluation"}:

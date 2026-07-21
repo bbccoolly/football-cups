@@ -9,6 +9,7 @@ from statistics import median
 from typing import Any, Iterable
 
 from football_cups.collector.config import CUTOFFS
+from football_cups.collector.results import load_competition_formats
 from football_cups.collector.storage import make_run_id
 from football_cups.collector.timeutil import iso_utc, utc_now
 from football_cups.database.config import DatabaseConfig
@@ -16,6 +17,12 @@ from football_cups.database.connection import apply_migrations, connect
 
 from . import SCHEMA_VERSION, research_flags
 from .config import ResearchConfig
+from .competition_profiles import (
+    CompetitionProfile,
+    confidence_assessment,
+    load_competition_registry,
+    market_statistics,
+)
 from .reporting import OUTCOMES, _metric_rows, load_records
 from .storage import ResearchStore, json_dumps, research_facts_lock, stable_id
 
@@ -380,7 +387,8 @@ def _live_batch_rows(connection, targets: list[str], now: datetime, lookahead_ho
             """
             WITH latest_identity AS (
                 SELECT DISTINCT ON (fixture_id)
-                    fixture_id, kickoff_at, competition_name, home_team_name, away_team_name
+                    fixture_id, kickoff_at, competition_id, competition_name,
+                    home_team_name, away_team_name
                 FROM football.fixture_identities
                 WHERE kickoff_at IS NOT NULL
                 ORDER BY fixture_id, observed_at DESC, record_id DESC
@@ -393,6 +401,7 @@ def _live_batch_rows(connection, targets: list[str], now: datetime, lookahead_ho
                 batch.core_observed_at,
                 batch.market_results,
                 latest_identity.kickoff_at,
+                latest_identity.competition_id,
                 latest_identity.competition_name,
                 latest_identity.home_team_name,
                 latest_identity.away_team_name
@@ -405,6 +414,56 @@ def _live_batch_rows(connection, targets: list[str], now: datetime, lookahead_ho
             (targets, lower, upper),
         ).fetchall()
     ]
+
+
+def _identity_as_of(connection, fixture_id: str, target: str) -> dict[str, Any] | None:
+    if target not in CUTOFFS:
+        raise ResearchModelError(f"unsupported shadow target: {target}")
+    minutes, _ = CUTOFFS[target]
+    row = connection.execute(
+        """
+        SELECT record_id, fixture_id, observed_at, kickoff_at, competition_id,
+               competition_name, home_team_name, away_team_name, identity_status
+        FROM football.fixture_identities
+        WHERE fixture_id = %s
+          AND kickoff_at IS NOT NULL
+          AND observed_at <= kickoff_at - %s
+        ORDER BY observed_at DESC, record_id DESC
+        LIMIT 1
+        """,
+        (fixture_id, timedelta(minutes=minutes)),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _automatic_evaluation_stats(connection, channel: str) -> dict[tuple[str, str], dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT prediction.competition_id, prediction.target,
+               count(DISTINCT prediction.fixture_id) AS fixture_count,
+               min(prediction.prediction_cutoff) AS first_cutoff,
+               max(prediction.prediction_cutoff) AS last_cutoff
+        FROM research.shadow_predictions AS prediction
+        JOIN football.current_verified_results AS result
+          ON result.fixture_id = prediction.fixture_id
+        WHERE prediction.channel = %s
+          AND prediction.status = 'published'
+          AND prediction.competition_id IS NOT NULL
+          AND result.verification_method NOT IN (
+              'manual', 'manual-import', 'project-owner-manual-declaration'
+          )
+        GROUP BY prediction.competition_id, prediction.target
+        """,
+        (channel,),
+    ).fetchall()
+    result: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        span = row["last_cutoff"] - row["first_cutoff"]
+        result[(str(row["competition_id"]), str(row["target"]))] = {
+            "fixture_count": int(row["fixture_count"]),
+            "span_days": span.total_seconds() / 86400,
+        }
+    return result
 
 
 def _live_1x2_consensus(connection, fixture_id: str, target: str, snapshot_record_id: str, cutoff: datetime) -> tuple[tuple[float, float, float] | None, dict[str, Any]]:
@@ -435,17 +494,45 @@ def _live_1x2_consensus(connection, fixture_id: str, target: str, snapshot_recor
             probabilities[bookmaker] = probability
             if max_observed_at is None or row["observed_at"] > max_observed_at:
                 max_observed_at = row["observed_at"]
-    consensus = _median_consensus(probabilities.values()) if len(probabilities) >= 3 else None
+    consensus = None
+    direction_strength = None
+    bookmaker_dispersion = None
+    if len(probabilities) >= 3:
+        consensus, direction_strength, bookmaker_dispersion = market_statistics(probabilities.values())
     features = {
         "bookmaker_count": len(probabilities),
         "bookmakers": sorted(probabilities),
         "source_snapshot_record_id": snapshot_record_id,
         "market_observed_at": iso_utc(max_observed_at) if max_observed_at else None,
+        "direction_strength": direction_strength,
+        "bookmaker_dispersion": bookmaker_dispersion,
     }
     if consensus:
         features["log_home_draw"] = math.log(consensus[0] / consensus[1])
         features["log_away_draw"] = math.log(consensus[2] / consensus[1])
     return consensus, features
+
+
+def _profile_fields(registry, profile: CompetitionProfile, identity: dict[str, Any] | None) -> dict[str, Any]:
+    resolved_competition_id = None
+    if identity:
+        resolved_competition_id = str(
+            identity.get("competition_id") or profile.competition_id or ""
+        ) or None
+    return {
+        "competition_id": resolved_competition_id,
+        "competition_name": identity.get("competition_name") if identity else None,
+        "competition_type": profile.competition_type,
+        "market_evidence_tier": profile.market_evidence_tier,
+        "evaluation_group": profile.evaluation_group,
+        "classification_status": profile.classification_status,
+        "registry_version": registry.registry_version,
+        "policy_version": registry.policy_version,
+        "registry_file_sha256": registry.file_sha256,
+        "registry_canonical_sha256": registry.canonical_sha256,
+        "identity_record_id": identity.get("record_id") if identity else None,
+        "identity_observed_at": iso_utc(identity["observed_at"]) if identity else None,
+    }
 
 
 def publish_shadow_predictions(
@@ -459,6 +546,10 @@ def publish_shadow_predictions(
     lookback_hours: int = 2,
 ) -> dict[str, Any]:
     observed_now = now or utc_now()
+    registry = load_competition_registry(config.workspace)
+    competition_formats = load_competition_formats(
+        config.workspace / "config" / "competition-formats.json"
+    )
     targets = sorted(set(targets))
     for target in targets:
         if target not in {"T-24h", "T-6h", "T-60m", "T-10m"}:
@@ -475,30 +566,62 @@ def publish_shadow_predictions(
         ).fetchone()
         if activation is None:
             raise ResearchModelError(f"no active research model activation for channel {channel}")
+        evaluation_stats = _automatic_evaluation_stats(connection, channel)
         batches = _live_batch_rows(connection, targets, observed_now, lookahead_hours, lookback_hours)
         for batch in batches:
-            kickoff_at = batch["kickoff_at"].astimezone(UTC)
-            cutoff = _prediction_cutoff(kickoff_at, str(batch["target"]))
-            deadline = _deadline(kickoff_at, cutoff)
+            target = str(batch["target"])
+            candidate_kickoff_at = batch["kickoff_at"].astimezone(UTC)
+            candidate_cutoff = _prediction_cutoff(candidate_kickoff_at, target)
+            candidate_deadline = _deadline(candidate_kickoff_at, candidate_cutoff)
+            if observed_now < candidate_cutoff or observed_now > candidate_deadline:
+                continue
+            identity = _identity_as_of(connection, str(batch["fixture_id"]), target)
+            if identity is None:
+                kickoff_at = candidate_kickoff_at
+                cutoff = candidate_cutoff
+                deadline = candidate_deadline
+            else:
+                kickoff_at = identity["kickoff_at"].astimezone(UTC)
+                cutoff = _prediction_cutoff(kickoff_at, target)
+                deadline = _deadline(kickoff_at, cutoff)
             if observed_now < cutoff or observed_now > deadline:
                 continue
             record_id = stable_id(
                 "research_shadow_prediction",
                 channel,
                 batch["fixture_id"],
-                batch["target"],
+                target,
                 iso_utc(cutoff),
             )
             if record_id in existing_ids:
                 skipped_existing += 1
                 continue
+            profile = registry.resolve(
+                identity.get("competition_id") if identity else None,
+                identity.get("competition_name") if identity else None,
+            )
+            profile_fields = _profile_fields(registry, profile, identity)
+            competition_id = str(identity.get("competition_id") or "") if identity else ""
+            competition_format = competition_formats.get(
+                f"id:{competition_id}",
+                competition_formats.get(str(identity.get("competition_name") or ""), "unknown")
+                if identity
+                else "unknown",
+            )
+            sample = evaluation_stats.get((competition_id, target), {})
             market_results = batch.get("market_results") or {}
             ouzhi = market_results.get("ouzhi") if isinstance(market_results, dict) else None
             snapshot_record_id = str((ouzhi or {}).get("snapshot_record_id") or "")
             probabilities = None
             features: dict[str, Any] = {}
             abstention_reason = None
-            if not snapshot_record_id:
+            if identity is None:
+                abstention_reason = "missing_identity_as_of_cutoff"
+            elif profile.conflict:
+                abstention_reason = "competition_profile_conflict"
+            elif profile.unregistered:
+                abstention_reason = "unregistered_competition"
+            elif not snapshot_record_id:
                 abstention_reason = "missing_selected_1x2_snapshot"
             else:
                 probabilities, features = _live_1x2_consensus(
@@ -510,9 +633,27 @@ def publish_shadow_predictions(
                 )
                 if probabilities is None:
                     abstention_reason = "insufficient_live_1x2_bookmakers"
-            if probabilities is None:
+            if probabilities is None or profile.market_evidence_tier == "D":
                 status = "abstained"
                 probability_payload: dict[str, Any] = {}
+                assessment = {
+                    "raw_confidence_label": "observation_only",
+                    "competition_confidence_cap": profile.confidence_cap,
+                    "confidence_label": "observation_only",
+                    "confidence_reasons": [abstention_reason or "prediction_abstained"],
+                    "risk_flags": sorted(
+                        flag
+                        for flag, enabled in (
+                            ("competition_profile_conflict", profile.conflict),
+                            ("unregistered_competition", profile.unregistered),
+                            ("result_scope_verification_risk", competition_format != "regular_time_only"),
+                        )
+                        if enabled
+                    ),
+                    "automatic_verified_fixture_count": int(sample.get("fixture_count", 0)),
+                    "evaluation_span_days": float(sample.get("span_days", 0.0)),
+                    "review_eligible": False,
+                }
             else:
                 status = "published"
                 probability_payload = {
@@ -522,12 +663,23 @@ def publish_shadow_predictions(
                     "sum": sum(probabilities),
                     "method": "individual-devig-component-median",
                 }
+                assessment = confidence_assessment(
+                    registry,
+                    profile,
+                    probabilities,
+                    bookmaker_count=int(features["bookmaker_count"]),
+                    direction_strength=float(features["direction_strength"]),
+                    bookmaker_dispersion=float(features["bookmaker_dispersion"]),
+                    automatic_verified_fixtures=int(sample.get("fixture_count", 0)),
+                    evaluation_span_days=float(sample.get("span_days", 0.0)),
+                    competition_format=competition_format,
+                )
             records.append(
                 {
                     **_base_record("ResearchShadowPrediction", record_id, "shadow_event"),
                     "channel": channel,
                     "fixture_id": str(batch["fixture_id"]),
-                    "target": str(batch["target"]),
+                    "target": target,
                     "prediction_cutoff": iso_utc(cutoff),
                     "published_at": iso_utc(observed_now),
                     "status": status,
@@ -539,11 +691,15 @@ def publish_shadow_predictions(
                     "market_observed_at": features.get("market_observed_at"),
                     "bookmaker_count": features.get("bookmaker_count", 0),
                     "probabilities": probability_payload,
+                    **profile_fields,
+                    "direction_strength": features.get("direction_strength"),
+                    "bookmaker_dispersion": features.get("bookmaker_dispersion"),
+                    **assessment,
                     "features": {
                         **features,
-                        "competition_name": batch.get("competition_name"),
-                        "home_team_name": batch.get("home_team_name"),
-                        "away_team_name": batch.get("away_team_name"),
+                        "competition_format": competition_format,
+                        "home_team_name": identity.get("home_team_name") if identity else None,
+                        "away_team_name": identity.get("away_team_name") if identity else None,
                     },
                     "abstention_reason": abstention_reason,
                 }
@@ -584,8 +740,104 @@ def publish_shadow_predictions(
     }
 
 
+def _distribution(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0}
+    return {
+        "count": len(values),
+        "minimum": min(values),
+        "median": median(values),
+        "maximum": max(values),
+    }
+
+
+def _shadow_group_summary(rows: list[dict[str, Any]], gate: dict[str, Any]) -> dict[str, Any]:
+    published = [row for row in rows if row["status"] == "published"]
+    evaluated = [row for row in published if row.get("home_goals") is not None]
+    automatic = [
+        row
+        for row in evaluated
+        if row.get("verification_method")
+        not in {"manual", "manual-import", "project-owner-manual-declaration"}
+    ]
+
+    def points(selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "actual": _outcome(int(row["home_goals"]), int(row["away_goals"])),
+                "market": tuple(float(row["probabilities"][key]) for key in OUTCOMES),
+            }
+            for row in selected
+        ]
+
+    def direction_accuracy(selected: list[dict[str, Any]]) -> float | None:
+        values = points(selected)
+        if not values:
+            return None
+        correct = sum(
+            max(range(3), key=lambda index: point["market"][index]) == point["actual"]
+            for point in values
+        )
+        return correct / len(values)
+
+    risk_counts = defaultdict(int)
+    for row in rows:
+        for risk in row.get("risk_flags") or []:
+            risk_counts[str(risk)] += 1
+    tail_rows = [row for row in evaluated if "strong_favorite_draw_tail" in (row.get("risk_flags") or [])]
+    automatic_fixtures = {str(row["fixture_id"]) for row in automatic}
+    automatic_cutoffs = [row["prediction_cutoff"] for row in automatic]
+    span_days = (
+        (max(automatic_cutoffs) - min(automatic_cutoffs)).total_seconds() / 86400
+        if automatic_cutoffs
+        else 0.0
+    )
+    return {
+        "fixture_count": len({str(row["fixture_id"]) for row in rows}),
+        "published": len(published),
+        "abstained": sum(row["status"] == "abstained" for row in rows),
+        "evaluated": len(evaluated),
+        "manual_declared_results": sum(
+            row.get("verification_method") == "project-owner-manual-declaration" for row in evaluated
+        ),
+        "all_valid_results": {
+            **_metric_rows(points(evaluated), "market"),
+            "direction_accuracy": direction_accuracy(evaluated),
+        },
+        "automatic_results": {
+            **_metric_rows(points(automatic), "market"),
+            "direction_accuracy": direction_accuracy(automatic),
+        },
+        "bookmaker_count": _distribution([float(row["bookmaker_count"]) for row in published]),
+        "direction_strength": _distribution(
+            [float(row["direction_strength"]) for row in published if row.get("direction_strength") is not None]
+        ),
+        "bookmaker_dispersion": _distribution(
+            [float(row["bookmaker_dispersion"]) for row in published if row.get("bookmaker_dispersion") is not None]
+        ),
+        "risk_flags": dict(sorted(risk_counts.items())),
+        "strong_favorite_draw_tail": {
+            "evaluated": len(tail_rows),
+            "draws": sum(int(row["home_goals"]) == int(row["away_goals"]) for row in tail_rows),
+            "draw_rate": (
+                sum(int(row["home_goals"]) == int(row["away_goals"]) for row in tail_rows)
+                / len(tail_rows)
+                if tail_rows
+                else None
+            ),
+        },
+        "automatic_verified_fixture_count": len(automatic_fixtures),
+        "evaluation_span_days": span_days,
+        "review_eligible": (
+            len(automatic_fixtures) >= gate["minimum_automatic_verified_fixtures"]
+            and span_days >= gate["minimum_span_days"]
+        ),
+    }
+
+
 def evaluate_shadow_predictions(config: ResearchConfig, *, channel: str, now: datetime | None = None) -> dict[str, Any]:
     evaluated_at = now or utc_now()
+    registry = load_competition_registry(config.workspace)
     database_config = DatabaseConfig.from_workspace(config.workspace)
     with connect(database_config) as connection:
         apply_migrations(connection)
@@ -594,32 +846,60 @@ def evaluate_shadow_predictions(config: ResearchConfig, *, channel: str, now: da
             SELECT prediction.*, result.home_goals, result.away_goals,
                    result.verification_method
             FROM research.shadow_predictions AS prediction
-            JOIN football.current_verified_results AS result
+            LEFT JOIN football.current_verified_results AS result
               ON result.fixture_id = prediction.fixture_id
             WHERE prediction.channel = %s
-              AND prediction.status = 'published'
             ORDER BY prediction.prediction_cutoff, prediction.fixture_id
             """,
             (channel,),
         ).fetchall()
-    points = []
-    by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    by_method: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        probabilities = row["probabilities"]
-        point = {
-            "actual": _outcome(int(row["home_goals"]), int(row["away_goals"])),
-            "market": (probabilities["home"], probabilities["draw"], probabilities["away"]),
+    values = [dict(row) for row in rows]
+    legacy_points = []
+    for row in values:
+        if row["status"] == "published" and row.get("home_goals") is not None:
+            probabilities = row["probabilities"]
+            legacy_points.append(
+                {
+                    "actual": _outcome(int(row["home_goals"]), int(row["away_goals"])),
+                    "market": tuple(float(probabilities[key]) for key in OUTCOMES),
+                }
+            )
+        if not row.get("market_evidence_tier"):
+            row["market_evidence_tier"] = "legacy_unclassified"
+        if not row.get("competition_type"):
+            row["competition_type"] = "legacy_unclassified"
+        if not row.get("evaluation_group"):
+            row["evaluation_group"] = "legacy_unclassified"
+        if not row.get("confidence_label"):
+            row["confidence_label"] = "legacy_unclassified"
+    gate = registry.confidence_policy["high_confidence_gate"]
+
+    def grouped(field: str) -> dict[str, Any]:
+        selected: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in values:
+            selected[str(row.get(field) or "unknown")].append(row)
+        return {
+            key: _shadow_group_summary(group, gate) for key, group in sorted(selected.items())
         }
-        points.append(point)
-        by_target[str(row["target"])].append(point)
-        by_method[str(row["verification_method"])].append(point)
-    metrics = {"all": _metric_rows(points, "market")}
-    metrics["by_target"] = {
-        target: _metric_rows(selected, "market") for target, selected in sorted(by_target.items())
-    }
-    metrics["by_result_method"] = {
-        method: _metric_rows(selected, "market") for method, selected in sorted(by_method.items())
+
+    competition_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in values:
+        key = f"{row.get('competition_id') or 'unknown'}|{row['target']}"
+        competition_target[key].append(row)
+    metrics = {
+        "all": _metric_rows(legacy_points, "market"),
+        "summary": _shadow_group_summary(values, gate),
+        "by_target": grouped("target"),
+        "by_competition_id": grouped("competition_id"),
+        "by_competition_type": grouped("competition_type"),
+        "by_market_evidence_tier": grouped("market_evidence_tier"),
+        "by_evaluation_group": grouped("evaluation_group"),
+        "by_confidence_label": grouped("confidence_label"),
+        "by_result_method": grouped("verification_method"),
+        "by_competition_target": {
+            key: _shadow_group_summary(group, gate)
+            for key, group in sorted(competition_target.items())
+        },
     }
     record_id = stable_id("research_shadow_evaluation", channel, iso_utc(evaluated_at))
     record = {

@@ -396,6 +396,50 @@ def test_research_postgres_import_is_isolated(tmp_path: Path) -> None:
             result_eligible=True,
             source_payload={},
         ),
+        research_record(
+            "ResearchShadowPrediction",
+            "research-shadow",
+            research_kind="shadow_event",
+            backfill=False,
+            channel="research-shadow-v1",
+            fixture_id="live-fixture",
+            target="T-6h",
+            prediction_cutoff="2026-07-21T06:00:00Z",
+            published_at="2026-07-21T06:01:00Z",
+            status="published",
+            model_key="devig-consensus-v1",
+            model_version="test-version",
+            activation_record_id=None,
+            selected_batch_record_id="batch",
+            source_snapshot_record_id="snapshot",
+            market_observed_at="2026-07-21T05:59:00Z",
+            bookmaker_count=8,
+            probabilities={"home": 0.6, "draw": 0.25, "away": 0.15, "sum": 1.0},
+            features={},
+            abstention_reason=None,
+            competition_id="5",
+            competition_name="芬兰超级联赛",
+            competition_type="lower_evidence_league",
+            market_evidence_tier="C",
+            evaluation_group="finland-top-flight",
+            classification_status="provisional",
+            registry_version="competition-profile-v1",
+            policy_version="shadow-confidence-v1",
+            registry_file_sha256="a" * 64,
+            registry_canonical_sha256="b" * 64,
+            direction_strength=0.35,
+            bookmaker_dispersion=0.01,
+            raw_confidence_label="high",
+            competition_confidence_cap="low",
+            confidence_label="low",
+            confidence_reasons=["competition_confidence_cap"],
+            risk_flags=["low_market_evidence_tier"],
+            identity_record_id="identity-as-of",
+            identity_observed_at="2026-07-20T12:00:00Z",
+            automatic_verified_fixture_count=0,
+            evaluation_span_days=0.0,
+            review_eligible=False,
+        ),
     ]
     path = normalized / "records.jsonl"
     path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
@@ -410,6 +454,11 @@ def test_research_postgres_import_is_isolated(tmp_path: Path) -> None:
         first = import_research_files(connection, tmp_path / "data" / "research" / "normalized")
         second = import_research_files(connection, tmp_path / "data" / "research" / "normalized")
         after = connection.execute("SELECT count(*) AS count FROM football.records").fetchone()["count"]
-        assert first["records_inserted"] == 2
+        shadow = connection.execute(
+            "SELECT market_evidence_tier, confidence_label "
+            "FROM research.shadow_predictions WHERE record_id='research-shadow'"
+        ).fetchone()
+        assert first["records_inserted"] == 3
         assert second["records_inserted"] == 0
         assert before == after == 0
+        assert dict(shadow) == {"market_evidence_tier": "C", "confidence_label": "low"}

@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "registry_version": "competition-profile-v1",
+  "policy_version": "shadow-confidence-v1",
+  "competitions": {
+    "5": {
+      "canonical_name": "芬兰超级联赛",
+      "name_aliases": ["芬超", "芬兰超级联赛"],
+      "competition_type": "lower_evidence_league",
+      "market_evidence_tier": "C",
+      "evaluation_group": "finland-top-flight",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "low"
+    },
+    "16": {
+      "canonical_name": "韩职",
+      "name_aliases": ["韩职", "韩国K联赛"],
+      "competition_type": "domestic_league",
+      "market_evidence_tier": "B",
+      "evaluation_group": "korea-k1",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "medium"
+    },
+    "40": {
+      "canonical_name": "美职足",
+      "name_aliases": ["美职足", "美国职业大联盟"],
+      "competition_type": "domestic_league",
+      "market_evidence_tier": "B",
+      "evaluation_group": "usa-mls",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "medium"
+    },
+    "63": {
+      "canonical_name": "欧罗巴",
+      "name_aliases": ["欧罗巴", "欧联杯"],
+      "competition_type": "continental_competition",
+      "market_evidence_tier": "A",
+      "evaluation_group": "uefa-europa-league",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "high"
+    },
+    "94": {
+      "canonical_name": "瑞超",
+      "name_aliases": ["瑞超", "瑞典超级联赛"],
+      "competition_type": "domestic_league",
+      "market_evidence_tier": "B",
+      "evaluation_group": "sweden-allsvenskan",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "medium"
+    },
+    "101": {
+      "canonical_name": "欧冠",
+      "name_aliases": ["欧冠", "欧洲冠军联赛"],
+      "competition_type": "continental_competition",
+      "market_evidence_tier": "A",
+      "evaluation_group": "uefa-champions-league",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "high"
+    },
+    "109": {
+      "canonical_name": "挪超",
+      "name_aliases": ["挪超", "挪威超级联赛"],
+      "competition_type": "domestic_league",
+      "market_evidence_tier": "B",
+      "evaluation_group": "norway-eliteserien",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "medium"
+    },
+    "110": {
+      "canonical_name": "世界杯",
+      "name_aliases": ["世界杯", "国际足联世界杯"],
+      "competition_type": "international_competition",
+      "market_evidence_tier": "A",
+      "evaluation_group": "fifa-world-cup",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "high"
+    },
+    "145": {
+      "canonical_name": "巴甲",
+      "name_aliases": ["巴甲", "巴西甲级联赛"],
+      "competition_type": "domestic_league",
+      "market_evidence_tier": "B",
+      "evaluation_group": "brazil-serie-a",
+      "classification_status": "provisional",
+      "classification_reason": "Initial conservative policy classification",
+      "confidence_cap": "medium"
+    }
+  },
+  "confidence_policy": {
+    "minimum_bookmakers": 3,
+    "high": {
+      "minimum_bookmakers": 8,
+      "minimum_direction_margin": 0.15,
+      "maximum_dispersion": 0.02
+    },
+    "medium": {
+      "minimum_bookmakers": 5,
+      "minimum_direction_margin": 0.07,
+      "maximum_dispersion": 0.035
+    },
+    "strong_favorite_draw_tail": {
+      "minimum_favorite_probability": 0.58,
+      "minimum_draw_probability": 0.18
+    },
+    "high_confidence_gate": {
+      "minimum_automatic_verified_fixtures": 200,
+      "minimum_span_days": 90
+    }
+  }
+}
