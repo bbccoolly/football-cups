@@ -18,6 +18,12 @@ from .modeling import (
     train_devig_consensus_model,
     write_model_dataset,
 )
+from .k1_guardrail import (
+    K1GuardrailError,
+    dry_run_k1_guardrail,
+    evaluate_k1_guardrail_forward,
+    evaluate_k1_guardrail_history,
+)
 from .normalize import (
     ResearchIntegrityError,
     ResearchNormalizeError,
@@ -85,6 +91,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     shadow_eval = subparsers.add_parser("evaluate-shadow")
     _workspace(shadow_eval)
     shadow_eval.add_argument("--channel", default=CHANNEL_DEFAULT)
+    history_guardrail = subparsers.add_parser("evaluate-k1-guardrail-history")
+    _workspace(history_guardrail)
+    guardrail = subparsers.add_parser("k1-guardrail")
+    _workspace(guardrail)
+    guardrail.add_argument("--fixture-id", required=True)
+    guardrail.add_argument("--target", required=True, choices=["T-24h", "T-6h", "T-60m", "T-10m"])
+    guardrail.add_argument("--dry-run", action="store_true", required=True)
+    forward_guardrail = subparsers.add_parser("evaluate-k1-guardrail-forward")
+    _workspace(forward_guardrail)
+    forward_guardrail.add_argument("--channel", default=CHANNEL_DEFAULT)
     return parser.parse_args(argv)
 
 
@@ -192,7 +208,17 @@ def main(argv: list[str] | None = None) -> int:
             result = evaluate_shadow_predictions(config, channel=args.channel)
             print(json_dumps(result, indent=2))
             return 0
-    except (ValueError, ResearchNormalizeError, ResearchImportError, ResearchModelError) as exc:
+        if args.command == "evaluate-k1-guardrail-history":
+            result = evaluate_k1_guardrail_history(config)
+            print(json_dumps(result, indent=2))
+            return 0
+        if args.command == "k1-guardrail":
+            print(json_dumps(dry_run_k1_guardrail(config, fixture_id=args.fixture_id, target=args.target), indent=2))
+            return 0
+        if args.command == "evaluate-k1-guardrail-forward":
+            print(json_dumps(evaluate_k1_guardrail_forward(config, channel=args.channel), indent=2))
+            return 0
+    except (ValueError, ResearchNormalizeError, ResearchImportError, ResearchModelError, K1GuardrailError) as exc:
         print(json_dumps({"status": "invalid", "error_type": type(exc).__name__, "error": str(exc)}, indent=2))
         return 2
     except (AccessPolicyError, BudgetExceeded, IntegrityError, ResearchIntegrityError) as exc:

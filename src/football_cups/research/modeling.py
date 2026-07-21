@@ -13,7 +13,7 @@ from football_cups.collector.results import load_competition_formats
 from football_cups.collector.storage import make_run_id
 from football_cups.collector.timeutil import iso_utc, utc_now
 from football_cups.database.config import DatabaseConfig
-from football_cups.database.connection import apply_migrations, connect
+from football_cups.database.connection import connect
 
 from . import SCHEMA_VERSION, research_flags
 from .config import ResearchConfig
@@ -22,6 +22,12 @@ from .competition_profiles import (
     confidence_assessment,
     load_competition_registry,
     market_statistics,
+)
+from .k1_guardrail import (
+    collect_k1_guardrail_assessment,
+    completed_manifest,
+    load_k1_guardrail_policy,
+    require_migration,
 )
 from .reporting import OUTCOMES, _metric_rows, load_records
 from .storage import ResearchStore, json_dumps, research_facts_lock, stable_id
@@ -547,6 +553,7 @@ def publish_shadow_predictions(
 ) -> dict[str, Any]:
     observed_now = now or utc_now()
     registry = load_competition_registry(config.workspace)
+    guardrail_policy = load_k1_guardrail_policy(config.workspace)
     competition_formats = load_competition_formats(
         config.workspace / "config" / "competition-formats.json"
     )
@@ -557,9 +564,10 @@ def publish_shadow_predictions(
     existing_ids = _published_prediction_ids(config, channel)
     database_config = DatabaseConfig.from_workspace(config.workspace)
     records: list[dict[str, Any]] = []
+    assessments: list[dict[str, Any]] = []
     skipped_existing = 0
     with connect(database_config) as connection:
-        apply_migrations(connection)
+        require_migration(connection)
         activation = connection.execute(
             "SELECT * FROM research.current_model_activations WHERE channel = %s",
             (channel,),
@@ -674,8 +682,7 @@ def publish_shadow_predictions(
                     evaluation_span_days=float(sample.get("span_days", 0.0)),
                     competition_format=competition_format,
                 )
-            records.append(
-                {
+            prediction = {
                     **_base_record("ResearchShadowPrediction", record_id, "shadow_event"),
                     "channel": channel,
                     "fixture_id": str(batch["fixture_id"]),
@@ -703,39 +710,57 @@ def publish_shadow_predictions(
                     },
                     "abstention_reason": abstention_reason,
                 }
+            records.append(prediction)
+            assessment = collect_k1_guardrail_assessment(
+                connection,
+                workspace=config.workspace,
+                prediction=prediction,
+                batch=batch,
+                policy=guardrail_policy,
+                assessed_at=observed_now,
             )
+            if assessment is not None:
+                records.append(assessment)
+                assessments.append(assessment)
     if dry_run or not records:
+        prediction_records = [record for record in records if record["record_type"] == "ResearchShadowPrediction"]
         return {
             "status": "dry_run" if dry_run else "unchanged",
             "channel": channel,
-            "candidate_records": len(records),
+            "candidate_records": len(prediction_records),
             "skipped_existing": skipped_existing,
-            "records": records,
+            "records": prediction_records,
+            "guardrail_assessments": assessments,
         }
     with research_facts_lock(config):
         store = ResearchStore(config)
         run_id = make_run_id(observed_now)
         path = store.write_records("shadow-predictions", run_id, "shadow-predictions", records)
+        manifest = completed_manifest(
+            path,
+            run_id=run_id,
+            prediction_count=sum(record["record_type"] == "ResearchShadowPrediction" for record in records),
+            assessment_count=len(assessments),
+            policy_version=guardrail_policy.policy_version if assessments else None,
+        )
+        manifest["record_path"] = path.relative_to(config.research_dir).as_posix()
+        manifest["channel"] = channel
+        manifest["targets"] = targets
         store.write_manifest(
             run_id,
             "shadow-predictions",
-            {
-                "schema_version": 1,
-                "run_id": run_id,
-                "status": "completed",
-                "channel": channel,
-                "targets": targets,
-                "record_count": len(records),
-                "record_path": path.relative_to(config.research_dir).as_posix(),
-            },
+            manifest,
         )
     return {
         "status": "completed",
         "run_id": run_id,
         "channel": channel,
-        "records_written": len(records),
-        "published": sum(1 for record in records if record["status"] == "published"),
-        "abstained": sum(1 for record in records if record["status"] == "abstained"),
+        "records_written": sum(record["record_type"] == "ResearchShadowPrediction" for record in records),
+        "total_records_written": len(records),
+        "published": sum(1 for record in records if record["record_type"] == "ResearchShadowPrediction" and record["status"] == "published"),
+        "abstained": sum(1 for record in records if record["record_type"] == "ResearchShadowPrediction" and record["status"] == "abstained"),
+        "assessments_written": len(assessments),
+        "guardrail_unavailable": sum(assessment["audit_status"] == "unavailable" for assessment in assessments),
         "skipped_existing": skipped_existing,
     }
 
@@ -840,7 +865,7 @@ def evaluate_shadow_predictions(config: ResearchConfig, *, channel: str, now: da
     registry = load_competition_registry(config.workspace)
     database_config = DatabaseConfig.from_workspace(config.workspace)
     with connect(database_config) as connection:
-        apply_migrations(connection)
+        require_migration(connection)
         rows = connection.execute(
             """
             SELECT prediction.*, result.home_goals, result.away_goals,

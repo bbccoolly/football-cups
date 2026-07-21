@@ -17,6 +17,7 @@ from football_cups.database.connection import apply_migrations, connect
 from . import SCHEMA_VERSION, research_flags
 from .config import ResearchConfig
 from .competition_profiles import CONFIDENCE_RANK, valid_sha256
+from .k1_guardrail import K1GuardrailError, validate_assessment_record, verify_shadow_manifest
 
 
 SUPPORTED_TYPES = frozenset(
@@ -30,6 +31,7 @@ SUPPORTED_TYPES = frozenset(
         "ResearchModelVersion",
         "ResearchModelActivation",
         "ResearchShadowPrediction",
+        "ResearchK1GuardrailAssessment",
         "ResearchRetrospectiveEvaluation",
         "ResearchShadowEvaluation",
     }
@@ -130,6 +132,10 @@ def _validate(record: Any, source_file: str, line_number: int) -> dict[str, Any]
         if record.get(key) != expected:
             raise ResearchImportError(f"{source_file}:{line_number}: invalid research flag {key}")
     _validate_shadow_policy(record, source_file, line_number)
+    try:
+        validate_assessment_record(record)
+    except K1GuardrailError as exc:
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: {exc}") from exc
     return record
 
 
@@ -385,6 +391,73 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 record.get("review_eligible"),
             ),
         )
+    elif record_type == "ResearchK1GuardrailAssessment":
+        prediction = connection.execute(
+            """
+            SELECT channel, fixture_id, competition_id, target, prediction_cutoff, published_at,
+                   identity_record_id, selected_batch_record_id
+            FROM research.shadow_predictions WHERE record_id=%s
+            """,
+            (record["prediction_record_id"],),
+        ).fetchone()
+        if prediction is None:
+            raise ResearchImportIntegrityError("K1 assessment references a missing prediction")
+        expected = {
+            "channel": record["channel"],
+            "fixture_id": str(record["fixture_id"]),
+            "competition_id": record["competition_id"],
+            "target": record["target"],
+            "prediction_cutoff": record["prediction_cutoff"],
+            "identity_record_id": record.get("identity_record_id"),
+            "selected_batch_record_id": record.get("selected_batch_record_id"),
+        }
+        actual = dict(prediction)
+        published_at = actual.pop("published_at")
+        actual["fixture_id"] = str(actual["fixture_id"])
+        if str(actual["prediction_cutoff"]) != str(expected["prediction_cutoff"]):
+            from datetime import datetime as _datetime
+            expected_cutoff = _datetime.fromisoformat(str(expected["prediction_cutoff"]).replace("Z", "+00:00"))
+            if actual["prediction_cutoff"] != expected_cutoff:
+                raise ResearchImportIntegrityError("K1 assessment prediction cutoff mismatch")
+            actual["prediction_cutoff"] = expected["prediction_cutoff"]
+        if actual != expected:
+            raise ResearchImportIntegrityError("K1 assessment prediction reference mismatch")
+        from datetime import datetime as _datetime
+        assessed_at = _datetime.fromisoformat(str(record["assessed_at"]).replace("Z", "+00:00"))
+        if assessed_at < published_at:
+            raise ResearchImportIntegrityError("K1 assessment precedes its prediction")
+        connection.execute(
+            """
+            INSERT INTO research.k1_guardrail_assessments(
+                record_id, prediction_record_id, channel, fixture_id, competition_id,
+                target, prediction_cutoff, assessed_at, policy_version, policy_revision,
+                policy_status, policy_snapshot, policy_file_sha256,
+                policy_canonical_sha256, historical_dataset_sha256, git_commit,
+                relevant_source_tree_sha256, relevant_dirty_paths, identity_record_id,
+                selected_batch_record_id, snapshot_record_ids, source_row_record_ids,
+                source_hashes, raw_features, rule_evaluations, rule_flags,
+                proposed_action, proposed_confidence_cap, reasons, audit_status, payload
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            ) ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id, record["prediction_record_id"], record["channel"], str(record["fixture_id"]),
+                record["competition_id"], record["target"], record["prediction_cutoff"], record["assessed_at"],
+                record["policy_version"], record["policy_revision"], record["policy_status"],
+                Jsonb(record["policy_snapshot"]), record["policy_file_sha256"], record["policy_canonical_sha256"],
+                record["historical_dataset_sha256"], record.get("git_commit"), record["relevant_source_tree_sha256"],
+                Jsonb(record.get("relevant_dirty_paths") or []), record.get("identity_record_id"),
+                record.get("selected_batch_record_id"), Jsonb(record.get("snapshot_record_ids") or {}),
+                Jsonb(record.get("source_row_record_ids") or []), Jsonb(record.get("source_hashes") or {}),
+                Jsonb(record.get("raw_features") or {}), Jsonb(record.get("rule_evaluations") or {}),
+                Jsonb(record.get("rule_flags") or []), record["proposed_action"],
+                record.get("proposed_confidence_cap"), Jsonb(record.get("reasons") or []),
+                record["audit_status"], Jsonb(record),
+            ),
+        )
     elif record_type in {"ResearchRetrospectiveEvaluation", "ResearchShadowEvaluation"}:
         table = (
             "retrospective_evaluations"
@@ -415,6 +488,14 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
 def _insert_record(
     connection: Connection, record: dict[str, Any], source_file: str, line_number: int
 ) -> bool:
+    if record.get("record_type") == "ResearchK1GuardrailAssessment":
+        prior = connection.execute(
+            "SELECT payload FROM research.records WHERE record_id=%s", (record["record_id"],)
+        ).fetchone()
+        if prior is not None and prior["payload"] != record:
+            raise ResearchImportIntegrityError(
+                f"{source_file}:{line_number}: immutable K1 assessment payload changed"
+            )
     inserted = connection.execute(
         """
         INSERT INTO research.records(
@@ -447,6 +528,10 @@ def import_research_files(connection: Connection, normalized_dir: Path) -> dict[
     try:
         for path in sorted(normalized_dir.rglob("*.jsonl")) if normalized_dir.is_dir() else []:
             source_file = path.relative_to(normalized_dir.parent).as_posix()
+            try:
+                verify_shadow_manifest(normalized_dir.parent, path)
+            except K1GuardrailError as exc:
+                raise ResearchImportIntegrityError(f"{source_file}: {exc}") from exc
             content = path.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
             checkpoint = connection.execute(
@@ -549,6 +634,7 @@ def run_database_import(config: ResearchConfig) -> dict[str, Any]:
             "model_versions",
             "model_activations",
             "shadow_predictions",
+            "k1_guardrail_assessments",
             "retrospective_evaluations",
             "shadow_evaluations",
         )

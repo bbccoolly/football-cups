@@ -92,6 +92,8 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 
 影子预测使用 `config/research-competition-profiles.json` 的显式赛事ID和版本化置信策略。任务只在 `T-24h`、`T-6h`、`T-60m`、`T-10m` 的真实发布窗口追加记录；窗口外返回 `unchanged`。运维检查：
 
+韩职K1还读取`config/research-k1-guardrail.json`。只有`prediction_cutoff >= effective_at`的自然K1机会才在同一原子JSONL追加shadow assessment；相关源码未提交时记录`unavailable`而不修改基础预测。新批次manifest必须携带记录哈希和prediction/assessment计数。策略首版拒绝`active`，不得通过任务参数绕过。
+
 ```powershell
 .\.venv\Scripts\football-cups-research.exe shadow-predict --workspace . --channel research-shadow-v1 --dry-run
 Get-ChildItem data\research\normalized\shadow-predictions -Recurse -Filter *.jsonl |

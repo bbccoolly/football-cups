@@ -169,6 +169,13 @@ scripts\windows\install_shadow_prediction_task.ps1 -Workspace .
 
 迁移013已启用D-030赛事分层。旧预测按 `legacy_unclassified` 保留；第一条携带as-of身份、双哈希、赛事等级、置信和风险字段的新记录必须由未来自然窗口生成，不允许历史补发。
 
+迁移014已启用D-031 K1规则护栏shadow层。`evaluate-k1-guardrail-history`复现330场聚合资产，但固定标记`historical_exact_evaluable=false`，不构造公司一致率、精确R1/R2、R4或R5。精确assessment只从`prediction_cutoff >= effective_at`的未来live V2自然发布产生；shadow只记录拟议动作，不修改概率、置信或发布状态。
+
+```powershell
+.\.venv\Scripts\football-cups-research.exe evaluate-k1-guardrail-history --workspace .
+.\.venv\Scripts\football-cups-research.exe evaluate-k1-guardrail-forward --workspace . --channel research-shadow-v1
+```
+
 ## 10. 退出码
 
 - `0`：成功或静态资产未变化。

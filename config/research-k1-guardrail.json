@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "policy_version": "k1-guardrail-shadow-v1",
+  "policy_revision": 1,
+  "status": "shadow",
+  "effective_at": "2026-07-22T00:00:00Z",
+  "competition_id": "16",
+  "targets": ["T-24h", "T-6h", "T-60m", "T-10m"],
+  "thresholds": {
+    "minimum_bookmakers_per_market": 3,
+    "minimum_paired_bookmakers": 3,
+    "favorite_probability_drop": 0.015,
+    "favorite_probability_strengthening": 0.010,
+    "alternative_probability_rise": 0.0075,
+    "favorite_odds_rise": 0.03,
+    "signal_support_ratio": 0.60,
+    "clear_favorite_probability": 0.45,
+    "clear_direction_gap": 0.07,
+    "asian_material_move": 0.25,
+    "low_total_line": 2.25,
+    "draw_tail_probability": 0.28,
+    "handicap_non_cover_margin": 0.10,
+    "high_dispersion": 0.035,
+    "live_observation_count": 3,
+    "live_observation_span_seconds": 1800,
+    "live_line_range": 0.25,
+    "live_probability_range": 0.015
+  },
+  "forward_gate": {
+    "minimum_automatic_fixtures": 100,
+    "minimum_span_days": 90,
+    "minimum_rule_hits": 50,
+    "minimum_batch_hits": 25,
+    "calibration_residual_maximum": -0.03,
+    "relative_residual_maximum": -0.03,
+    "bootstrap_iterations": 10000,
+    "shadow_confidence_level": 0.90,
+    "active_confidence_level": 0.95
+  }
+}
