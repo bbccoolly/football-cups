@@ -80,3 +80,38 @@ class ResearchStore:
         path = self.config.research_dir / "reports" / category / f"{name}.json"
         self.atomic_write(path, (json_dumps(payload, indent=2) + "\n").encode("utf-8"))
         return path
+
+    def write_completed_shadow_batch(
+        self,
+        *,
+        run_id: str,
+        records: Iterable[dict[str, Any]],
+        manifest_fields: dict[str, Any],
+    ) -> Path:
+        """Publish records and their completion manifest with one directory rename."""
+        staging = self.config.research_dir / "state" / "shadow-staging" / run_id
+        destination = self.config.normalized_dir / "shadow-predictions" / run_id
+        if staging.exists() or destination.exists():
+            raise FileExistsError(staging if staging.exists() else destination)
+        staging.mkdir(parents=True)
+        record_name = "shadow-predictions.jsonl"
+        content = "".join(json_dumps(record) + "\n" for record in records).encode("utf-8")
+        self.atomic_write(staging / record_name, content)
+        manifest = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "status": "completed",
+            "record_path": f"normalized/shadow-predictions/{run_id}/{record_name}",
+            "record_sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+            "line_count": len(content.splitlines()),
+            **manifest_fields,
+        }
+        self.atomic_write(staging / "manifest.json", (json_dumps(manifest, indent=2) + "\n").encode("utf-8"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, destination)
+        try:
+            staging.parent.rmdir()
+        except OSError:
+            pass
+        return destination / record_name

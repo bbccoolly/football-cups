@@ -6,13 +6,14 @@ import math
 import random
 import subprocess
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from statistics import median
 from typing import Any, Iterable, Mapping
 
 from football_cups.collector.markets import market_row_role
+from football_cups.collector.config import CUTOFFS
 
 from .competition_profiles import market_statistics, valid_sha256
 from .config import ResearchConfig
@@ -48,6 +49,8 @@ class K1GuardrailPolicy:
     targets: tuple[str, ...]
     thresholds: dict[str, float | int]
     forward_gate: dict[str, float | int]
+    input_policy: dict[str, Any]
+    presentation_policy: dict[str, Any]
     file_sha256: str
     canonical_sha256: str
 
@@ -100,6 +103,29 @@ def load_k1_guardrail_policy(workspace: Path) -> K1GuardrailPolicy:
     gate = payload.get("forward_gate")
     if not isinstance(thresholds, dict) or not isinstance(gate, dict):
         raise K1GuardrailError("thresholds and forward_gate are required")
+    input_policy = payload.get("input_policy")
+    presentation = payload.get("presentation_policy")
+    expected_input = {
+        "opening_source": "provider_declared_opening_from_selected_v2_row",
+        "close_source": "selected_v2_row_current",
+        "close_semantics": "as_of_cutoff_current",
+        "batch_selection": "latest_model_eligible_batch_at_or_before_cutoff",
+        "cross_target_mixing": False,
+        "cross_batch_market_mixing": False,
+    }
+    if input_policy != expected_input:
+        raise K1GuardrailError("invalid K1 guardrail input policy")
+    if not isinstance(presentation, dict) or presentation.get("version") != "k1-guardrail-presentation-v1":
+        raise K1GuardrailError("invalid K1 guardrail presentation policy")
+    expected_presentation = {
+        "keep": {"label": "保持", "confidence_action": "unchanged"},
+        "caution": {"label": "谨慎", "confidence_action": "unchanged"},
+        "downgrade": {"label": "降置信", "confidence_cap": "low"},
+        "abstain": {"label": "回避", "direction_action": "suppress"},
+    }
+    for action, expected in expected_presentation.items():
+        if presentation.get(action) != expected:
+            raise K1GuardrailError(f"invalid presentation policy for {action}")
     integer_thresholds = {
         "minimum_bookmakers_per_market": 3,
         "minimum_paired_bookmakers": 3,
@@ -141,6 +167,8 @@ def load_k1_guardrail_policy(workspace: Path) -> K1GuardrailPolicy:
         checked_gate[name] = _number(gate, name, minimum=-1, maximum=0)
     if checked_gate["active_confidence_level"] <= checked_gate["shadow_confidence_level"]:
         raise K1GuardrailError("active confidence level must exceed shadow confidence level")
+    if checked_gate["active_confidence_level"] != 0.95:
+        raise K1GuardrailError("active confidence level must be the registered one-sided 0.95")
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return K1GuardrailPolicy(
         path=path,
@@ -153,9 +181,72 @@ def load_k1_guardrail_policy(workspace: Path) -> K1GuardrailPolicy:
         targets=tuple(targets),
         thresholds=checked_thresholds,
         forward_gate=checked_gate,
+        input_policy=dict(input_policy),
+        presentation_policy=dict(presentation),
         file_sha256=hashlib.sha256(content).hexdigest(),
         canonical_sha256=hashlib.sha256(canonical).hexdigest(),
     )
+
+
+def select_k1_batch_as_of(
+    connection,
+    *,
+    fixture_id: str,
+    target: str,
+    prediction_cutoff: datetime,
+    available_at: datetime,
+) -> dict[str, Any] | None:
+    """Select the latest complete model-eligible batch that was operationally available."""
+    if target not in TARGETS:
+        raise K1GuardrailError(f"unsupported K1 guardrail target: {target}")
+    cutoff = prediction_cutoff.astimezone(UTC)
+    available = available_at.astimezone(UTC)
+    row = connection.execute(
+        """
+        SELECT batch.*
+        FROM football.model_eligible_snapshot_batches_v2 AS batch
+        WHERE batch.fixture_id=%s AND batch.target=%s
+          AND batch.model_strict_eligible=true
+          AND batch.core_observed_at <= %s
+          AND batch.completed_at <= %s
+          AND NOT EXISTS (
+              SELECT 1 FROM football.current_invalid_fixtures AS invalid
+              WHERE invalid.fixture_id=batch.fixture_id
+          )
+        ORDER BY batch.core_observed_at DESC, batch.completed_at DESC, batch.record_id DESC
+        LIMIT 1
+        """,
+        (fixture_id, target, cutoff, available),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def guarded_presentation(
+    *,
+    probabilities: Mapping[str, Any],
+    base_confidence: str,
+    action: str,
+    policy: K1GuardrailPolicy,
+) -> dict[str, Any]:
+    if action not in ACTIONS:
+        raise K1GuardrailError(f"unsupported guardrail action: {action}")
+    labels = policy.presentation_policy[action]
+    direction = None
+    if probabilities and action != "abstain":
+        direction = max(("home", "draw", "away"), key=lambda name: float(probabilities.get(name, 0)))
+    confidence = base_confidence
+    if action == "downgrade":
+        rank = {"observation_only": 0, "low": 1, "medium": 2, "high": 3}
+        confidence = min((base_confidence, "low"), key=lambda value: rank.get(value, 0))
+    elif action == "abstain":
+        confidence = "observation_only"
+    return {
+        "action_code": action,
+        "action_label": labels["label"],
+        "direction": direction,
+        "confidence_label": confidence,
+        "presentation_policy_version": policy.presentation_policy["version"],
+    }
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -362,7 +453,15 @@ def assess_guardrail_features(features: Mapping[str, Any], policy: K1GuardrailPo
     observation_count = int(features.get("live_observation_count", 0))
     observation_span = int(features.get("live_observation_span_seconds", 0))
     r5_evaluable = observation_count >= int(t["live_observation_count"]) and observation_span >= int(t["live_observation_span_seconds"])
-    r5 = r5_evaluable and float(features.get("live_line_range") or math.inf) <= float(t["live_line_range"]) and float(features.get("live_probability_range") or math.inf) <= float(t["live_probability_range"])
+    line_range = features.get("live_line_range")
+    probability_range = features.get("live_probability_range")
+    r5 = (
+        r5_evaluable
+        and line_range is not None
+        and probability_range is not None
+        and float(line_range) <= float(t["live_line_range"])
+        and float(probability_range) <= float(t["live_probability_range"])
+    )
     r6 = float(features.get("bookmaker_dispersion") or 0) > float(t["high_dispersion"])
     values = {
         "r0_data_integrity": "not_matched",
@@ -471,6 +570,8 @@ def validate_assessment_record(record: Mapping[str, Any]) -> None:
             targets=tuple(snapshot.get("targets") or []),
             thresholds=dict(snapshot.get("thresholds") or {}),
             forward_gate=dict(snapshot.get("forward_gate") or {}),
+            input_policy=dict(snapshot.get("input_policy") or {}),
+            presentation_policy=dict(snapshot.get("presentation_policy") or {}),
             file_sha256=str(record.get("policy_file_sha256")),
             canonical_sha256=str(record.get("policy_canonical_sha256")),
         )
@@ -511,7 +612,8 @@ def verify_shadow_manifest(research_dir: Path, record_path: Path) -> None:
     if len(relative.parts) < 2:
         raise K1GuardrailError(f"invalid shadow prediction path: {record_path}")
     run_id = relative.parts[0]
-    manifest_path = research_dir / "manifests" / run_id / "shadow-predictions.json"
+    colocated = record_path.parent / "manifest.json"
+    manifest_path = colocated if colocated.is_file() else research_dir / "manifests" / run_id / "shadow-predictions.json"
     if not manifest_path.is_file():
         raise K1GuardrailError(f"shadow prediction batch lacks completed manifest: {run_id}")
     try:
@@ -540,6 +642,137 @@ def verify_shadow_manifest(research_dir: Path, record_path: Path) -> None:
         raise K1GuardrailError(f"shadow prediction manifest mismatch ({run_id}): {', '.join(failed)}")
 
 
+def _opening_fields(market: str) -> tuple[str, ...]:
+    return {
+        "ouzhi": ("opening_home", "opening_draw", "opening_away"),
+        "yazhi": ("opening_home", "opening_line", "opening_away"),
+        "daxiao": ("opening_over", "opening_line", "opening_under"),
+    }[market]
+
+
+def _unstable_opening_companies(
+    connection,
+    *,
+    fixture_id: str,
+    target: str,
+    market: str,
+    cutoff: datetime,
+    available_at: datetime,
+) -> set[str]:
+    rows = connection.execute(
+        """
+        SELECT row.source_bookmaker_name, row.opening_home, row.opening_draw,
+               row.opening_away, row.opening_line, row.opening_over, row.opening_under
+        FROM football.model_eligible_snapshot_batches_v2 AS batch
+        JOIN football.current_bookmaker_market_rows AS row
+          ON row.source_snapshot_record_id=(batch.market_results->%s->>'snapshot_record_id')
+        WHERE batch.fixture_id=%s AND batch.target=%s
+          AND batch.model_strict_eligible=true
+          AND batch.core_observed_at <= %s AND batch.completed_at <= %s
+          AND row.market=%s AND row.event_origin='live' AND row.normalization_version=2
+          AND row.row_role='bookmaker' AND row.observed_at <= %s
+        """,
+        (market, fixture_id, target, cutoff, available_at, market, cutoff),
+    ).fetchall()
+    fields = _opening_fields(market)
+    signatures: dict[str, set[tuple[str, ...]]] = {}
+    for raw in rows:
+        row = dict(raw)
+        name = str(row.get("source_bookmaker_name") or "").strip()
+        if name:
+            signatures.setdefault(name, set()).add(tuple(str(row.get(field)) for field in fields))
+    return {name for name, values in signatures.items() if len(values) > 1}
+
+
+def _trajectory_features(
+    connection,
+    *,
+    fixture_id: str,
+    target: str,
+    cutoff: datetime,
+    available_at: datetime,
+    favorite_side: str | None,
+) -> dict[str, Any]:
+    if favorite_side not in {"home", "away"}:
+        return {"live_observation_count": 0, "live_observation_span_seconds": 0,
+                "live_line_range": None, "live_probability_range": None,
+                "live_response_set_hashes": []}
+    batches = connection.execute(
+        """
+        SELECT record_id, completed_at, core_observed_at, market_results
+        FROM football.model_eligible_snapshot_batches_v2
+        WHERE fixture_id=%s AND target=%s AND model_strict_eligible=true
+          AND core_observed_at <= %s AND completed_at <= %s
+        ORDER BY core_observed_at, completed_at, record_id
+        """,
+        (fixture_id, target, cutoff, available_at),
+    ).fetchall()
+    observations: dict[str, tuple[datetime, float, float]] = {}
+    for raw_batch in batches:
+        batch = dict(raw_batch)
+        results = batch.get("market_results") or {}
+        ids = [str((results.get(market) or {}).get("snapshot_record_id") or "") for market in ("ouzhi", "yazhi", "daxiao")]
+        if any(not value for value in ids):
+            continue
+        hash_rows = connection.execute(
+            "SELECT record_id, raw_sha256 FROM football.market_snapshots WHERE record_id=ANY(%s)",
+            (ids,),
+        ).fetchall()
+        hashes = {str(row["record_id"]): str(row["raw_sha256"] or "") for row in hash_rows}
+        if len(hashes) != 3 or any(not hashes.get(value) for value in ids):
+            continue
+        response_hash = hashlib.sha256(json.dumps([hashes[value] for value in ids], separators=(",", ":")).encode()).hexdigest()
+        if response_hash in observations:
+            continue
+        euro_rows = [dict(row) for row in connection.execute(
+            """SELECT record_id, source_bookmaker_name, current_home, current_draw, current_away, source_row_index
+               FROM football.current_bookmaker_market_rows
+               WHERE source_snapshot_record_id=%s AND market='ouzhi' AND row_role='bookmaker'
+                 AND event_origin='live' AND normalization_version=2 AND observed_at <= %s""",
+            (ids[0], cutoff),
+        ).fetchall()]
+        euro, conflicts = _deduplicate(euro_rows, ("current_home", "current_draw", "current_away"))
+        if conflicts:
+            continue
+        probs = []
+        for row in euro.values():
+            value = _devig((row.get("current_home"), row.get("current_draw"), row.get("current_away")))
+            if value:
+                probs.append(tuple(float(part) for part in value))
+        if len(probs) < 3:
+            continue
+        consensus, _, _ = market_statistics(probs)
+        asian_rows = [dict(row) for row in connection.execute(
+            """SELECT record_id, source_bookmaker_name, current_line, source_row_index
+               FROM football.current_bookmaker_market_rows
+               WHERE source_snapshot_record_id=%s AND market='yazhi' AND row_role='bookmaker'
+                 AND event_origin='live' AND normalization_version=2 AND observed_at <= %s""",
+            (ids[1], cutoff),
+        ).fetchall()]
+        asian, conflicts = _deduplicate(asian_rows, ("current_line",))
+        lines = [_decimal(row.get("current_line")) for row in asian.values()]
+        lines = [value for value in lines if value is not None]
+        if conflicts or len(lines) < 3:
+            continue
+        line = _median((-value if favorite_side == "home" else value for value in lines))
+        if line is None:
+            continue
+        probability = consensus[0 if favorite_side == "home" else 2]
+        observations[response_hash] = (batch["core_observed_at"].astimezone(UTC), float(line), float(probability))
+    ordered = sorted(observations.values())
+    if not ordered:
+        return {"live_observation_count": 0, "live_observation_span_seconds": 0,
+                "live_line_range": None, "live_probability_range": None,
+                "live_response_set_hashes": []}
+    return {
+        "live_observation_count": len(ordered),
+        "live_observation_span_seconds": int((ordered[-1][0] - ordered[0][0]).total_seconds()),
+        "live_line_range": max(value[1] for value in ordered) - min(value[1] for value in ordered),
+        "live_probability_range": max(value[2] for value in ordered) - min(value[2] for value in ordered),
+        "live_response_set_hashes": sorted(observations),
+    }
+
+
 def collect_k1_guardrail_assessment(
     connection,
     *,
@@ -548,19 +781,25 @@ def collect_k1_guardrail_assessment(
     batch: Mapping[str, Any],
     policy: K1GuardrailPolicy,
     assessed_at: datetime,
+    enforce_effective_at: bool = True,
+    enforce_reproducible_source: bool = True,
 ) -> dict[str, Any] | None:
     if str(prediction.get("competition_id") or "") != policy.competition_id:
         return None
     cutoff = _utc(prediction.get("prediction_cutoff"), "prediction_cutoff")
     published = _utc(prediction.get("published_at"), "published_at")
     assessed_at = assessed_at.astimezone(UTC)
-    if cutoff < policy.effective_at:
+    if enforce_effective_at and cutoff < policy.effective_at:
         return None
     fingerprint = relevant_source_fingerprint(workspace)
     if published < cutoff or assessed_at < published:
         return unavailable_assessment(prediction, policy, assessed_at, "invalid_assessment_time_order", fingerprint)
-    if fingerprint["relevant_dirty_paths"]:
+    if enforce_reproducible_source and fingerprint["relevant_dirty_paths"]:
         return unavailable_assessment(prediction, policy, assessed_at, "relevant_source_not_reproducible", fingerprint)
+    if str(batch.get("record_id") or batch.get("snapshot_batch_record_id") or "") != str(prediction.get("selected_batch_record_id") or ""):
+        return unavailable_assessment(prediction, policy, assessed_at, "selected_batch_reference_conflict", fingerprint)
+    if batch.get("completed_at") and batch["completed_at"].astimezone(UTC) > published:
+        return unavailable_assessment(prediction, policy, assessed_at, "batch_not_available_at_publication", fingerprint)
     market_results = batch.get("market_results") or {}
     snapshot_ids: dict[str, str] = {}
     hard_reasons: list[str] = []
@@ -573,6 +812,7 @@ def collect_k1_guardrail_assessment(
             hard_reasons.append(f"missing_snapshot:{market}")
     market_rows: dict[str, list[Mapping[str, Any]]] = {}
     source_hashes: dict[str, str] = {}
+    opening_warnings: list[str] = []
     for market in ("ouzhi", "yazhi", "daxiao"):
         snapshot_id = snapshot_ids.get(market)
         if not snapshot_id:
@@ -600,7 +840,7 @@ def collect_k1_guardrail_assessment(
                    opening_home, opening_draw, opening_away, opening_line,
                    opening_over, opening_under, current_home, current_draw,
                    current_away, current_line, current_over, current_under,
-                   source_row_index, source_page_sha256, observed_at
+                   source_row_index, source_page_sha256, source_workbook_sha256, observed_at
             FROM football.current_bookmaker_market_rows
             WHERE fixture_id=%s AND target=%s AND market=%s
               AND source_snapshot_record_id=%s
@@ -610,9 +850,27 @@ def collect_k1_guardrail_assessment(
             """,
             (str(prediction["fixture_id"]), prediction["target"], market, snapshot_id, cutoff),
         ).fetchall()
-        market_rows[market] = [dict(row) for row in rows]
+        selected_rows = [dict(row) for row in rows]
+        unstable = _unstable_opening_companies(
+            connection, fixture_id=str(prediction["fixture_id"]), target=str(prediction["target"]),
+            market=market, cutoff=cutoff, available_at=published,
+        )
+        if unstable:
+            opening_warnings.extend(f"provider_opening_changed:{market}:{name}" for name in sorted(unstable))
+            selected_rows = [row for row in selected_rows if str(row.get("source_bookmaker_name") or "").strip() not in unstable]
+        expected_hash_field = "source_workbook_sha256" if market == "ouzhi" else "source_page_sha256"
+        row_hashes = {str(row.get(expected_hash_field) or "") for row in selected_rows}
+        if row_hashes != {source_hashes[market]}:
+            hard_reasons.append(f"source_hash_mismatch:{market}")
+        market_rows[market] = selected_rows
     handicap_rows: list[Mapping[str, Any]] = []
     if snapshot_ids.get("rangqiu"):
+        snapshot = connection.execute(
+            "SELECT record_id, fixture_id, market, target, observed_at, raw_sha256 FROM football.market_snapshots WHERE record_id=%s",
+            (snapshot_ids["rangqiu"],),
+        ).fetchone()
+        if snapshot is None or str(snapshot["fixture_id"]) != str(prediction["fixture_id"]) or snapshot["market"] != "rangqiu" or snapshot["target"] != prediction["target"] or snapshot["observed_at"].astimezone(UTC) > cutoff:
+            hard_reasons.append("snapshot_reference_conflict:rangqiu")
         rows = connection.execute(
             """
             SELECT row.record_id, row.source_bookmaker_name, row.handicap_line,
@@ -632,7 +890,15 @@ def collect_k1_guardrail_assessment(
         handicap_rows = [dict(row) for row in rows]
         if handicap_rows:
             source_hashes["rangqiu"] = str(handicap_rows[0].get("source_page_sha256") or "")
+            if snapshot is not None and source_hashes["rangqiu"] != str(snapshot["raw_sha256"] or ""):
+                hard_reasons.append("source_hash_mismatch:rangqiu")
     features, feature_reasons = build_guardrail_features(market_rows, handicap_rows, policy)
+    features["opening_stability_warnings"] = opening_warnings
+    features["source_row_record_ids"] = sorted(set(features.get("source_row_record_ids", [])) | {str(row.get("record_id")) for row in handicap_rows})
+    features.update(_trajectory_features(
+        connection, fixture_id=str(prediction["fixture_id"]), target=str(prediction["target"]),
+        cutoff=cutoff, available_at=published, favorite_side=features.get("favorite_side"),
+    ))
     hard_reasons.extend(feature_reasons)
     assessment = assess_guardrail_features(features, policy, hard_reasons)
     record_id = stable_id("research_k1_guardrail_assessment", prediction["record_id"], policy.policy_version)
@@ -776,6 +1042,221 @@ def dry_run_k1_guardrail(config: ResearchConfig, *, fixture_id: str, target: str
     return {"status": "dry_run", "fixture_id": fixture_id, "target": target, "assessment": assessment}
 
 
+def _replay_one(
+    connection,
+    *,
+    config: ResearchConfig,
+    fixture_id: str,
+    target: str,
+    policy: K1GuardrailPolicy,
+    now: datetime,
+    prefer_stored_prediction: bool,
+) -> dict[str, Any]:
+    from .modeling import _identity_as_of, _live_1x2_consensus, _prediction_cutoff, _deadline
+
+    latest = connection.execute(
+        """SELECT fixture_id, kickoff_at FROM football.fixture_identities
+           WHERE fixture_id=%s AND kickoff_at IS NOT NULL
+           ORDER BY observed_at DESC, record_id DESC LIMIT 1""",
+        (fixture_id,),
+    ).fetchone()
+    if latest is None:
+        raise K1GuardrailError(f"fixture identity is missing: {fixture_id}")
+    identity = _identity_as_of(connection, fixture_id, target)
+    if identity is None or str(identity.get("competition_id") or "") != "16" or identity.get("identity_status") == "conflict":
+        raise K1GuardrailError(f"fixture is not an unambiguous K1 identity as of cutoff: {fixture_id}")
+    kickoff = identity["kickoff_at"].astimezone(UTC)
+    cutoff = _prediction_cutoff(kickoff, target)
+    deadline = _deadline(kickoff, cutoff)
+    stored = None
+    if prefer_stored_prediction:
+        stored = connection.execute(
+            """SELECT * FROM research.shadow_predictions
+               WHERE fixture_id=%s AND target=%s AND prediction_cutoff=%s
+               ORDER BY published_at, record_id LIMIT 1""",
+            (fixture_id, target, cutoff),
+        ).fetchone()
+    if stored is not None:
+        prediction = dict(stored)
+        available_at = prediction["published_at"].astimezone(UTC)
+        batch = connection.execute(
+            "SELECT * FROM football.model_eligible_snapshot_batches_v2 WHERE record_id=%s",
+            (prediction.get("selected_batch_record_id"),),
+        ).fetchone()
+        if batch is None:
+            raise K1GuardrailError("stored prediction references a missing eligible batch")
+        selected = select_k1_batch_as_of(
+            connection, fixture_id=fixture_id, target=target,
+            prediction_cutoff=cutoff, available_at=available_at,
+        )
+        if selected is None or selected["record_id"] != batch["record_id"]:
+            raise K1GuardrailError("stored prediction batch is not the deterministic as-of batch")
+        batch = dict(batch)
+        publication_source = "stored_prediction"
+        probabilities = dict(prediction.get("probabilities") or {})
+        base_confidence = str(prediction.get("confidence_label") or "observation_only")
+        prediction["prediction_cutoff"] = cutoff.isoformat().replace("+00:00", "Z")
+        prediction["published_at"] = available_at.isoformat().replace("+00:00", "Z")
+    else:
+        available_at = min(deadline, now) if now < kickoff else deadline
+        batch = select_k1_batch_as_of(
+            connection, fixture_id=fixture_id, target=target,
+            prediction_cutoff=cutoff, available_at=available_at,
+        )
+        if batch is None:
+            raise K1GuardrailError(f"no model-eligible K1 batch exists as of {target}: {fixture_id}")
+        results = batch.get("market_results") or {}
+        snapshot_id = str((results.get("ouzhi") or {}).get("snapshot_record_id") or "")
+        consensus, features = _live_1x2_consensus(connection, fixture_id, target, snapshot_id, cutoff)
+        if consensus is None:
+            raise K1GuardrailError("selected K1 batch lacks a valid 1X2 consensus")
+        probabilities = {"home": consensus[0], "draw": consensus[1], "away": consensus[2], "sum": sum(consensus)}
+        direction = float(features.get("direction_strength") or 0)
+        dispersion = float(features.get("bookmaker_dispersion") or 0)
+        count = int(features.get("bookmaker_count") or 0)
+        base_confidence = "medium" if count >= 5 and direction >= 0.07 and dispersion <= 0.035 else "low"
+        prediction = {
+            "record_id": stable_id("ephemeral_k1_prediction", fixture_id, target, cutoff.isoformat()),
+            "channel": "research-shadow-v1", "fixture_id": fixture_id, "target": target,
+            "prediction_cutoff": cutoff.isoformat().replace("+00:00", "Z"),
+            "published_at": available_at.isoformat().replace("+00:00", "Z"),
+            "competition_id": "16", "identity_record_id": identity["record_id"],
+            "selected_batch_record_id": batch["record_id"], "probabilities": probabilities,
+            "confidence_label": base_confidence,
+        }
+        publication_source = "simulated_deadline" if available_at == deadline else "analysis_time"
+    assessment = collect_k1_guardrail_assessment(
+        connection, workspace=config.workspace, prediction=prediction, batch=batch,
+        policy=policy, assessed_at=max(now, available_at), enforce_effective_at=False,
+        enforce_reproducible_source=False,
+    )
+    if assessment is None:
+        raise K1GuardrailError("K1 guardrail assessment was not produced")
+    guarded = guarded_presentation(
+        probabilities=probabilities, base_confidence=base_confidence,
+        action=str(assessment["proposed_action"]), policy=policy,
+    )
+    display_features = dict(assessment["raw_features"])
+    source_rows = display_features.pop("source_row_record_ids", [])
+    display_features["source_row_record_count"] = len(source_rows)
+    return {
+        "fixture_id": fixture_id, "competition_id": "16", "target": target,
+        "kickoff_at": kickoff.isoformat().replace("+00:00", "Z"),
+        "prediction_cutoff": cutoff.isoformat().replace("+00:00", "Z"),
+        "available_at": available_at.isoformat().replace("+00:00", "Z"),
+        "publication_time_source": publication_source,
+        "identity_record_id": identity["record_id"], "selected_batch_record_id": batch["record_id"],
+        "home_team_name": identity.get("home_team_name"), "away_team_name": identity.get("away_team_name"),
+        "base_probabilities": probabilities, "base_confidence_label": base_confidence,
+        "guardrail": {
+            "policy_version": policy.policy_version,
+            "policy_canonical_sha256": policy.canonical_sha256,
+            "policy_was_active_at_cutoff": cutoff >= policy.effective_at,
+            "action_code": assessment["proposed_action"],
+            "action_label": guarded["action_label"],
+            "guarded_direction": guarded["direction"],
+            "guarded_confidence_label": guarded["confidence_label"],
+            "rule_evaluations": assessment["rule_evaluations"],
+            "rule_flags": assessment["rule_flags"],
+            "reasons": assessment["reasons"],
+            "raw_features": display_features,
+        },
+    }
+
+
+def analyze_k1(
+    config: ResearchConfig,
+    *,
+    fixture_id: str,
+    target: str | None,
+    latest_available_target: bool,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    from football_cups.database.config import DatabaseConfig
+    from football_cups.database.connection import connect
+
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    policy = load_k1_guardrail_policy(config.workspace)
+    with connect(DatabaseConfig.from_workspace(config.workspace)) as connection:
+        connection.execute("SET TRANSACTION READ ONLY")
+        require_migration(connection)
+        targets = [target] if target else sorted(policy.targets, key=lambda value: CUTOFFS[value][0], reverse=True)
+        errors = []
+        for candidate in targets:
+            try:
+                item = _replay_one(
+                    connection, config=config, fixture_id=fixture_id, target=str(candidate),
+                    policy=policy, now=observed, prefer_stored_prediction=True,
+                )
+                kickoff = _utc(item["kickoff_at"], "kickoff_at")
+                cutoff = _utc(item["prediction_cutoff"], "prediction_cutoff")
+                if latest_available_target and not (cutoff <= observed < kickoff):
+                    continue
+                return {"status": "dry_run", "persisted": False, "analysis": item}
+            except K1GuardrailError as exc:
+                errors.append(f"{candidate}:{exc}")
+        raise K1GuardrailError("no available K1 analysis target: " + "; ".join(errors))
+
+
+def blind_test_k1_guardrail(
+    config: ResearchConfig,
+    *,
+    fixture_ids: list[str] | None,
+    since: datetime | None,
+    until: datetime | None,
+    targets: list[str],
+    reveal_result: bool,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    from football_cups.database.config import DatabaseConfig
+    from football_cups.database.connection import connect
+
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    policy = load_k1_guardrail_policy(config.workspace)
+    with connect(DatabaseConfig.from_workspace(config.workspace)) as connection:
+        connection.execute("SET TRANSACTION READ ONLY")
+        require_migration(connection)
+        ids = list(dict.fromkeys(fixture_ids or []))
+        if not ids:
+            if since is None or until is None or since >= until:
+                raise K1GuardrailError("a valid since/until range is required")
+            rows = connection.execute(
+                """SELECT DISTINCT fixture_id FROM football.fixture_identities
+                   WHERE competition_id='16' AND kickoff_at >= %s AND kickoff_at < %s
+                   ORDER BY fixture_id LIMIT 501""",
+                (since, until),
+            ).fetchall()
+            ids = [str(row["fixture_id"]) for row in rows]
+        if len(ids) > 500:
+            raise K1GuardrailError("blind replay is limited to 500 fixtures")
+        frozen = []
+        errors = []
+        for fixture_id in ids:
+            for target in targets:
+                try:
+                    frozen.append(_replay_one(
+                        connection, config=config, fixture_id=fixture_id, target=target,
+                        policy=policy, now=observed, prefer_stored_prediction=True,
+                    ))
+                except K1GuardrailError as exc:
+                    errors.append({"fixture_id": fixture_id, "target": target, "error": str(exc)})
+        if reveal_result:
+            result_rows = connection.execute(
+                """SELECT fixture_id, home_goals, away_goals, record_id, verification_method
+                   FROM football.current_verified_results WHERE fixture_id=ANY(%s)""",
+                (ids,),
+            ).fetchall()
+            results = {str(row["fixture_id"]): dict(row) for row in result_rows}
+            for item in frozen:
+                item["revealed_result"] = results.get(item["fixture_id"])
+    return {
+        "status": "completed", "evaluation_mode": "retrospective_as_of_replay",
+        "persisted": False, "forward_gate_eligible": False,
+        "result_revealed": reveal_result, "fixture_count": len(ids),
+        "replay_count": len(frozen), "replays": frozen, "errors": errors,
+    }
+
+
 def _holm_adjust(values: Mapping[str, float]) -> dict[str, float]:
     ordered = sorted(values.items(), key=lambda item: item[1])
     count = len(ordered)
@@ -801,7 +1282,7 @@ def evaluate_k1_guardrail_forward(config: ResearchConfig, *, channel: str, now: 
                 """
                 SELECT assessment.*, prediction.probabilities, prediction.status AS prediction_status,
                        result.home_goals, result.away_goals, result.confirmed_at,
-                       result.verification_method
+                       result.record_id AS result_record_id, result.verification_method
                 FROM research.k1_guardrail_assessments AS assessment
                 JOIN research.shadow_predictions AS prediction
                   ON prediction.record_id=assessment.prediction_record_id
@@ -873,7 +1354,7 @@ def evaluate_k1_guardrail_forward(config: ResearchConfig, *, channel: str, now: 
                 "batch_one_count": len(batch_one), "batch_two_count": len(batch_two),
                 "batch_one_residual": sum(batch_one) / len(batch_one) if batch_one else None,
                 "batch_two_residual": sum(batch_two) / len(batch_two) if batch_two else None,
-                "bootstrap_upper": upper, "one_sided_p": p_value, "metrics": _scoring(points),
+                "one_sided_95_upper_bound": upper, "one_sided_p": p_value, "metrics": _scoring(points),
             }
     adjusted = _holm_adjust(p_values)
     gate = policy.forward_gate
@@ -889,11 +1370,18 @@ def evaluate_k1_guardrail_forward(config: ResearchConfig, *, channel: str, now: 
             group["batch_two_residual"] is not None and group["batch_two_residual"] < 0,
             group["calibration_residual"] is not None and group["calibration_residual"] <= float(gate["calibration_residual_maximum"]),
             group["relative_calibration_residual"] is not None and group["relative_calibration_residual"] <= float(gate["relative_residual_maximum"]),
-            group["bootstrap_upper"] is not None and group["bootstrap_upper"] < 0,
+            group["one_sided_95_upper_bound"] is not None and group["one_sided_95_upper_bound"] < 0,
             group["holm_adjusted_p"] < 0.05,
         ))
     fixture_ids = sorted({str(row["fixture_id"]) for row in evaluated})
-    fixture_set_hash = hashlib.sha256("\n".join(fixture_ids).encode()).hexdigest()
+    evaluation_members = sorted(
+        "|".join(str(row.get(name) or "") for name in (
+            "record_id", "prediction_record_id", "fixture_id", "target",
+            "result_record_id", "verification_method",
+        ))
+        for row in evaluated
+    )
+    fixture_set_hash = hashlib.sha256("\n".join(evaluation_members).encode()).hexdigest()
     confirmed = [row["confirmed_at"] for row in evaluated if row.get("confirmed_at")]
     evaluated_through = max(confirmed).astimezone(UTC)
     payload = {

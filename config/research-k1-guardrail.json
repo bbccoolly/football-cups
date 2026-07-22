@@ -1,11 +1,26 @@
 {
   "schema_version": 1,
-  "policy_version": "k1-guardrail-shadow-v1",
+  "policy_version": "k1-guardrail-shadow-v2",
   "policy_revision": 1,
   "status": "shadow",
-  "effective_at": "2026-07-22T00:00:00Z",
+  "effective_at": "2026-07-22T06:00:00Z",
   "competition_id": "16",
   "targets": ["T-24h", "T-6h", "T-60m", "T-10m"],
+  "input_policy": {
+    "opening_source": "provider_declared_opening_from_selected_v2_row",
+    "close_source": "selected_v2_row_current",
+    "close_semantics": "as_of_cutoff_current",
+    "batch_selection": "latest_model_eligible_batch_at_or_before_cutoff",
+    "cross_target_mixing": false,
+    "cross_batch_market_mixing": false
+  },
+  "presentation_policy": {
+    "version": "k1-guardrail-presentation-v1",
+    "keep": {"label": "保持", "confidence_action": "unchanged"},
+    "caution": {"label": "谨慎", "confidence_action": "unchanged"},
+    "downgrade": {"label": "降置信", "confidence_cap": "low"},
+    "abstain": {"label": "回避", "direction_action": "suppress"}
+  },
   "thresholds": {
     "minimum_bookmakers_per_market": 3,
     "minimum_paired_bookmakers": 3,

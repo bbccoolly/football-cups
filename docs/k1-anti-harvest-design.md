@@ -1,8 +1,8 @@
 # 韩职 K1 盘口规则护栏设计
 
-> 版本：V4.1
-> 日期：2026-07-21
-> 状态：shadow代码、迁移014、历史复现和任务接入已完成；等待策略生效后的首个自然K1 assessment
+> 版本：V4.2
+> 日期：2026-07-22
+> 状态：shadow-v2 as-of输入、只读分析和无存储历史回放已实现；等待首个自然v2 assessment
 
 ## 1. 结论与目标
 
@@ -24,6 +24,10 @@ abstain    数据不可信，或多个独立市场同时反对当前方向
 - 前向验证通过只产生 `review_eligible=true`；必须由项目负责人新增决策并启用新的策略版本，才允许实际 `downgrade` 或 `abstain`。
 
 330 场历史数据只用于提出和冻结候选规则。它不能证明因果关系，也不能直接授权生产动作。
+
+### 1.1 As-of close
+
+`opening`来自最终选中 V2 公司行的来源开盘字段；`close`来自预测 cutoff 前且在合法发布时间内已经完成的最后一个模型合格批次的 `current_*`。自然预测以实际 `published_at` 为可用时间，未发布历史模拟以 `min(cutoff+10m,kickoff-1m)` 为可用时间。不得跨 target 或批次拼接。多段响应只用于 opening 稳定性和同 target R5。
 
 ## 2. 历史证据与限制
 
@@ -376,6 +380,18 @@ football-cups-research k1-guardrail `
   --target T-6h `
   --dry-run
 
+football-cups-research analyze-k1 `
+  --workspace . `
+  --fixture-id <id> `
+  --target T-6h `
+  --dry-run
+
+football-cups-research blind-test-k1-guardrail `
+  --workspace . `
+  --fixture-id <id> `
+  --target T-6h `
+  --reveal-result
+
 football-cups-research evaluate-k1-guardrail-forward `
   --workspace . `
   --channel research-shadow-v1
@@ -400,13 +416,14 @@ football-cups-research evaluate-k1-guardrail-forward `
 3. 检查规则重叠、触发率、公司配对覆盖和阈值敏感性。
 4. 冻结 shadow-v1 配置和真实 `effective_at`；历史结果不得产生 active 动作。
 
-### Phase 2：append-only shadow 护栏（代码完成，等待自然窗口）
+### Phase 2：append-only shadow 护栏（v2代码完成，等待自然窗口）
 
-1. 实现截止时间冻结查询和纯规则函数。
+1. 实现截止时间、合法发布时间和as-of身份冻结查询及纯规则函数。
 2. 新增迁移 014、record/importer/current view 和报告。
 3. 接入现有 shadow 任务，不重新注册任务，不新增网络请求。
 4. 对未来自然窗口先 dry-run，再正式追加 assessment。
 5. 不补发策略生效前预测。
+6. 历史回放固定为只读、零持久化且不进入前向门禁。
 
 ### Phase 3：前向评估和人工启用
 

@@ -19,25 +19,26 @@
 - 建立 `devig-consensus-v1` research-only影子预测、不可覆盖发布、赛果评估和独立Windows任务。
 - 根据D-030完成显式赛事分层、as-of身份、注册表双哈希、公司概率MAD、置信上限和风险标签；迁移013已应用。
 - 根据D-031完成韩职K1规则护栏V4.1：版本化策略、同公司盘口差值、R0-R6动作矩阵、迁移014、completed manifest门禁、历史/前向评估和现有影子任务接入均已实现；仍固定为shadow，不改变概率或发布行为。
+- 根据D-032完成K1护栏V4.2代码：as-of合格批次同时限制cutoff和可用时间，opening/current保持同一V2行，R5读取同target多响应；新增中文派生方案和零持久化历史回放。策略仍为shadow。
 - 阿里云杭州Ubuntu 22.04 ECS已完成隔离smoke；根据D-018暂停正式迁移和云端timer。
 
 ## 当前运行事实
 
-截至 `2026-07-21 18:52 Asia/Shanghai`：
+截至 `2026-07-22 10:55 Asia/Shanghai`：
 
 - `health=ok`：SQLite `quick_check=ok`，0个逾期任务，磁盘、每日备份和每周内容寻址备份均为 `ok`。
 - 五个Windows任务均已恢复运行：采集、数据库导入、影子预测和两个备份任务的任务状态为Ready，影子任务最后一次返回码为0。
-- 正式库已应用迁移001至014；`records=200,688`、`unsupported_records=0`。
+- 正式库已应用迁移001至014；`records=213,576`、`unsupported_records=0`。
 - 市场层：`MarketSnapshot=1,454`、`BookmakerMarketRow=45,701`、`SnapshotBatch=393`、`SnapshotEligibilityAssessment=393`。
 - 赛果层：`ResultCandidate=58`、`VerifiedResult=46`、`current_verified_results=46`、`current_invalid_fixtures=1`。自动验证38场，负责人声明8场。
 - 模型合格快照：`T-48h=8`、`T-24h=32`、`T-12h=38`、`T-6h=50`、`T-3h/T-60m/T-30m/T-10m=48`。
 - 严格快照与有效赛果交集：`T-48h=8`、`T-24h=29`、`T-12h=34`、`T-6h/T-3h/T-60m/T-30m/T-10m=45`。
-- 研究层：1个数据集、1个模型版本、1个激活版本、25条影子预测、3条影子评估、1条K1历史复现；K1前向assessment当前为0。2026-07-21新增的自然影子预测均早于K1策略生效时间，不补评。
+- 研究层`records=124,053`；K1前向assessment当前为0。三场2026-07-21 K1的T-6h只读回放得到“谨慎、保持、谨慎”，揭示赛果前后研究文件均为5,539且数据库记录数不变。
 - 10条旧影子预测涉及4个fixture且均已有自动赛果；小样本Log Loss为1.1828、方向命中率40%，不能形成校准结论。
 - 当前9个赛事ID全部命中D-030注册表：欧冠/欧罗巴/世界杯为A，韩职/美职足/瑞超/挪超/巴甲为B，芬超为C；全部仍为 `provisional`。
-- D-031新增测试与既有测试全部通过，包含真实PostgreSQL迁移、首次/重复导入和空库schema重建；dry-run验证迁移数、research记录数和文件数均零变化。
+- D-032新增测试与既有测试全部通过，包含真实PostgreSQL迁移、首次/重复导入和空库schema重建；盲测验证research记录数和文件数均零变化。
 - K1历史复现热门校准残差为`+2.49pp`，90%周块区间为`[-1.49pp,+6.46pp]`，没有历史启用证据。
-- 最新双层备份：镜像批次 `20260721T105123895547Z-4405b1f1`，内容寻址批次 `20260721T105136780376Z-72f43819`。
+- 最新双层备份：镜像批次 `20260722T025645660022Z-985b745c`，内容寻址批次 `20260722T025713359290Z-1dd8818f`；两项任务返回0且`health`验证均为`ok`。
 
 ## 阶段门禁
 
@@ -57,7 +58,7 @@
 - 本地PostgreSQL使用trust认证且只绑定 `127.0.0.1:55432`，不得转发或暴露。
 - ECS只有40GB系统盘且没有正式数据盘；至少100GB数据盘、私有OSS恢复闭环和重新授权迁移前，云端timer必须保持禁用。
 - K1规则源码已提交为`9da04a0`且相关路径干净；若未来相关路径再次dirty，只能生成`unavailable/relevant_source_not_reproducible`。
-- 策略`effective_at=2026-07-22T00:00:00Z`已生效。当前0条前向assessment，需等待生效后的自然K1 cutoff；没有规则达到active启用条件。
+- 新策略`k1-guardrail-shadow-v2`预注册`effective_at=2026-07-22T06:00:00Z`。部署完成前任务不应产生v2正式assessment；没有规则达到active启用条件。
 - 广泛赛事可能缺少某类盘口；来源缺盘必须继续与程序失败分开统计。
 
 ## 人工待办
@@ -70,7 +71,7 @@
 
 ## Agent 唯一下一步
 
-观察生效后的首个自然K1 assessment，核对prediction/assessment同批JSONL、completed manifest、数据库引用、同公司差值和`proposed_action`；随后运行前向评估确认仍为`review_eligible=false`。不得补发旧预测或改变当前概率和置信。
+完成shadow-v2真实PostgreSQL回放、双层备份和干净提交，在`effective_at`前恢复任务；随后观察首个自然K1 v2 assessment，核对目录级manifest、as-of批次、R5轨迹和中文派生方案。不得补发旧预测或改变基础概率和置信。
 
 同时继续核验D-030上线后的自然影子记录，并保持体彩官方补偿每日最多一次，不扩大访问频率；阿里云ECS所有timer继续禁用。
 

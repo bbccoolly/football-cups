@@ -26,6 +26,8 @@
 
 根据 D-031，K1 规则护栏先以 append-only shadow assessment 运行：冻结同一 target、同一 SnapshotBatch、截止前且同公司配对的多市场差值，确定性生成 `keep/caution/downgrade/abstain` 拟议动作。shadow 不改变概率、置信或发布状态；每个切点和规则分别通过前向自动赛果门禁后，仍需负责人决策和新策略版本才能逐级启用。
 
+根据 D-032，批次选择还必须满足 `core_observed_at <= prediction_cutoff` 和 `completed_at <= available_at`。自然分析使用实际发布时间，历史模拟使用合法发布 deadline；历史回放只输出到终端，不写 JSONL、manifest、数据库或评估报告。R5只允许同一 target 的多响应轨迹。
+
 历史研究固定规则：不批量访问 500 历史页面；只下载显式注册的 Football-Data CSV/XLSX；K1 330 行作为派生特征而非原始盘口导入；所有记录均为 retrospective research，不映射到任何正式切点。2025 用于滚动先验，2026 只作已知非盲的时间分离评估。
 
 ## 3. 阶段 1：500 发现与技术验收（并行运行）

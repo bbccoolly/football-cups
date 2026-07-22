@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections import defaultdict
 from dataclasses import dataclass
@@ -25,9 +26,10 @@ from .competition_profiles import (
 )
 from .k1_guardrail import (
     collect_k1_guardrail_assessment,
-    completed_manifest,
     load_k1_guardrail_policy,
     require_migration,
+    select_k1_batch_as_of,
+    verify_shadow_manifest,
 )
 from .reporting import OUTCOMES, _metric_rows, load_records
 from .storage import ResearchStore, json_dumps, research_facts_lock, stable_id
@@ -375,13 +377,18 @@ def _deadline(kickoff_at: datetime, cutoff: datetime) -> datetime:
 
 
 def _published_prediction_ids(config: ResearchConfig, channel: str) -> set[str]:
-    records = load_records(config)
-    return {
-        record["record_id"]
-        for record in records.values()
-        if record.get("record_type") == "ResearchShadowPrediction"
-        and record.get("channel") == channel
-    }
+    result: set[str] = set()
+    root = config.normalized_dir / "shadow-predictions"
+    for path in sorted(root.rglob("*.jsonl")) if root.is_dir() else []:
+        try:
+            verify_shadow_manifest(config.research_dir, path)
+        except Exception:
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("record_type") == "ResearchShadowPrediction" and record.get("channel") == channel:
+                result.add(str(record["record_id"]))
+    return result
 
 
 def _live_batch_rows(connection, targets: list[str], now: datetime, lookahead_hours: int, lookback_hours: int) -> list[dict[str, Any]]:
@@ -594,6 +601,17 @@ def publish_shadow_predictions(
                 deadline = _deadline(kickoff_at, cutoff)
             if observed_now < cutoff or observed_now > deadline:
                 continue
+            selected_batch = select_k1_batch_as_of(
+                connection,
+                fixture_id=str(batch["fixture_id"]),
+                target=target,
+                prediction_cutoff=cutoff,
+                available_at=observed_now,
+            )
+            if selected_batch is None:
+                continue
+            selected_batch["snapshot_batch_record_id"] = selected_batch["record_id"]
+            batch = selected_batch
             record_id = stable_id(
                 "research_shadow_prediction",
                 channel,
@@ -735,21 +753,16 @@ def publish_shadow_predictions(
     with research_facts_lock(config):
         store = ResearchStore(config)
         run_id = make_run_id(observed_now)
-        path = store.write_records("shadow-predictions", run_id, "shadow-predictions", records)
-        manifest = completed_manifest(
-            path,
+        path = store.write_completed_shadow_batch(
             run_id=run_id,
-            prediction_count=sum(record["record_type"] == "ResearchShadowPrediction" for record in records),
-            assessment_count=len(assessments),
-            policy_version=guardrail_policy.policy_version if assessments else None,
-        )
-        manifest["record_path"] = path.relative_to(config.research_dir).as_posix()
-        manifest["channel"] = channel
-        manifest["targets"] = targets
-        store.write_manifest(
-            run_id,
-            "shadow-predictions",
-            manifest,
+            records=records,
+            manifest_fields={
+                "prediction_count": sum(record["record_type"] == "ResearchShadowPrediction" for record in records),
+                "assessment_count": len(assessments),
+                "policy_version": guardrail_policy.policy_version if assessments else None,
+                "channel": channel,
+                "targets": targets,
+            },
         )
     return {
         "status": "completed",

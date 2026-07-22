@@ -13,9 +13,13 @@ from football_cups.research.k1_guardrail import (
     assess_guardrail_features,
     build_guardrail_features,
     load_k1_guardrail_policy,
+    guarded_presentation,
+    select_k1_batch_as_of,
     verify_shadow_manifest,
     unavailable_assessment,
 )
+from football_cups.research.config import ResearchConfig
+from football_cups.research.storage import ResearchStore
 from football_cups.database.config import DatabaseConfig
 from football_cups.database.connection import apply_migrations, connect
 from football_cups.research.database import import_research_files
@@ -32,6 +36,70 @@ def test_policy_rejects_active_status(tmp_path: Path) -> None:
     (config / "research-k1-guardrail.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(K1GuardrailError, match="only accepts status=shadow"):
         load_k1_guardrail_policy(tmp_path)
+
+
+def test_v2_policy_freezes_input_and_chinese_presentation() -> None:
+    policy = load_k1_guardrail_policy(ROOT)
+    assert policy.policy_version == "k1-guardrail-shadow-v2"
+    assert policy.input_policy["close_semantics"] == "as_of_cutoff_current"
+    assert policy.presentation_policy["downgrade"]["label"] == "降置信"
+    downgraded = guarded_presentation(
+        probabilities={"home": 0.55, "draw": 0.25, "away": 0.20},
+        base_confidence="medium",
+        action="downgrade",
+        policy=policy,
+    )
+    assert downgraded["direction"] == "home"
+    assert downgraded["confidence_label"] == "low"
+    abstained = guarded_presentation(
+        probabilities={"home": 0.55, "draw": 0.25, "away": 0.20},
+        base_confidence="medium",
+        action="abstain",
+        policy=policy,
+    )
+    assert abstained["action_label"] == "回避"
+    assert abstained["direction"] is None
+    assert abstained["confidence_label"] == "observation_only"
+
+
+def test_as_of_selector_passes_cutoff_and_operational_availability() -> None:
+    class Result:
+        def fetchone(self):
+            return {"record_id": "batch-1"}
+
+    class Connection:
+        params = None
+
+        def execute(self, sql, params):
+            assert "core_observed_at <= %s" in sql
+            assert "completed_at <= %s" in sql
+            self.params = params
+            return Result()
+
+    connection = Connection()
+    cutoff = datetime(2026, 7, 22, 6, tzinfo=UTC)
+    available = datetime(2026, 7, 22, 6, 5, tzinfo=UTC)
+    selected = select_k1_batch_as_of(
+        connection, fixture_id="fixture", target="T-6h",
+        prediction_cutoff=cutoff, available_at=available,
+    )
+    assert selected == {"record_id": "batch-1"}
+    assert connection.params[-2:] == (cutoff, available)
+
+
+def test_shadow_batch_publication_is_directory_atomic(tmp_path: Path) -> None:
+    config = ResearchConfig(tmp_path, tmp_path / "data" / "research")
+    store = ResearchStore(config)
+    prediction = {"record_type": "ResearchShadowPrediction", "record_id": "prediction", "channel": "test"}
+    path = store.write_completed_shadow_batch(
+        run_id="run",
+        records=[prediction],
+        manifest_fields={"prediction_count": 1, "assessment_count": 0, "policy_version": None},
+    )
+    assert path.is_file()
+    assert (path.parent / "manifest.json").is_file()
+    assert not (config.research_dir / "state" / "shadow-staging" / "run").exists()
+    verify_shadow_manifest(config.research_dir, path)
 
 
 def test_action_matrix_does_not_add_auxiliary_scores() -> None:
@@ -74,6 +142,25 @@ def test_action_matrix_does_not_add_auxiliary_scores() -> None:
     result = assess_guardrail_features(primary, policy)
     assert result["proposed_action"] == "abstain"
     assert "r1_shallow_favorite_cooling" in result["rule_flags"]
+
+
+def test_r5_accepts_zero_ranges_as_stable() -> None:
+    policy = load_k1_guardrail_policy(ROOT)
+    features = {
+        "favorite_side": "home", "favorite_probability": 0.5, "prob_gap": 0.1,
+        "current_favorite_line": 0.75, "current_total_line": 2.5,
+        "delta_p_favorite_median": 0.0, "delta_favorite_odds_median": 0.0,
+        "favorite_cooling_support_ratio": 0.0, "alternative_strengthening_support_ratio": 0.0,
+        "delta_favorite_line_median": 0.0, "asian_retreat_support_ratio": 0.0,
+        "favorite_strengthening_support_ratio": 0.0, "asian_not_strengthening_ratio": 0.0,
+        "handicap_index_valid_bookmakers": 0, "bookmaker_dispersion": 0.0,
+        "live_observation_count": 3, "live_observation_span_seconds": 1800,
+        "live_line_range": 0.0, "live_probability_range": 0.0,
+        "probabilities": {"home": 0.5, "draw": 0.25, "away": 0.25},
+    }
+    result = assess_guardrail_features(features, policy)
+    assert result["rule_evaluations"]["r5_live_market_stability"]["status"] == "matched"
+    assert result["proposed_action"] == "caution"
 
 
 def _market_row(name: str, index: int, market: str) -> dict:

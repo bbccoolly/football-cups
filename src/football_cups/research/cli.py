@@ -20,6 +20,8 @@ from .modeling import (
 )
 from .k1_guardrail import (
     K1GuardrailError,
+    analyze_k1,
+    blind_test_k1_guardrail,
     dry_run_k1_guardrail,
     evaluate_k1_guardrail_forward,
     evaluate_k1_guardrail_history,
@@ -101,11 +103,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     forward_guardrail = subparsers.add_parser("evaluate-k1-guardrail-forward")
     _workspace(forward_guardrail)
     forward_guardrail.add_argument("--channel", default=CHANNEL_DEFAULT)
+    analyze = subparsers.add_parser("analyze-k1")
+    _workspace(analyze)
+    analyze.add_argument("--fixture-id", required=True)
+    analyze_target = analyze.add_mutually_exclusive_group(required=True)
+    analyze_target.add_argument("--target", choices=["T-24h", "T-6h", "T-60m", "T-10m"])
+    analyze_target.add_argument("--latest-available-target", action="store_true")
+    analyze.add_argument("--dry-run", action="store_true", required=True)
+    blind = subparsers.add_parser("blind-test-k1-guardrail")
+    _workspace(blind)
+    blind.add_argument("--fixture-id", action="append")
+    blind.add_argument("--since")
+    blind.add_argument("--until")
+    blind.add_argument("--target", action="append", choices=["T-24h", "T-6h", "T-60m", "T-10m"])
+    blind.add_argument("--reveal-result", action="store_true")
     return parser.parse_args(argv)
 
 
 def _date(value: str):
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _rfc3339(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("RFC3339 value must include timezone")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -217,6 +242,22 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "evaluate-k1-guardrail-forward":
             print(json_dumps(evaluate_k1_guardrail_forward(config, channel=args.channel), indent=2))
+            return 0
+        if args.command == "analyze-k1":
+            print(json_dumps(analyze_k1(
+                config, fixture_id=args.fixture_id, target=args.target,
+                latest_available_target=bool(args.latest_available_target),
+            ), indent=2))
+            return 0
+        if args.command == "blind-test-k1-guardrail":
+            if bool(args.fixture_id) == bool(args.since or args.until):
+                raise ValueError("use either --fixture-id or the complete --since/--until range")
+            print(json_dumps(blind_test_k1_guardrail(
+                config, fixture_ids=args.fixture_id,
+                since=_rfc3339(args.since), until=_rfc3339(args.until),
+                targets=args.target or ["T-24h", "T-6h", "T-60m", "T-10m"],
+                reveal_result=bool(args.reveal_result),
+            ), indent=2))
             return 0
     except (ValueError, ResearchNormalizeError, ResearchImportError, ResearchModelError, K1GuardrailError) as exc:
         print(json_dumps({"status": "invalid", "error_type": type(exc).__name__, "error": str(exc)}, indent=2))
