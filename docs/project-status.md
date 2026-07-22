@@ -1,6 +1,6 @@
 # 项目当前状态
 
-> 更新日期：2026-07-21
+> 更新日期：2026-07-22
 > 当前阶段：阶段 3 - 标准化数据库
 > 阶段状态：正式数据库持续导入；采集连续验收、赛果闭环和 research-only 影子预测并行运行
 
@@ -26,13 +26,13 @@
 截至 `2026-07-21 18:52 Asia/Shanghai`：
 
 - `health=ok`：SQLite `quick_check=ok`，0个逾期任务，磁盘、每日备份和每周内容寻址备份均为 `ok`。
-- 采集、数据库导入和两个备份任务保持原计划；影子预测任务在K1部署维护期间临时禁用，相关提交完成且源码指纹干净后恢复。
+- 五个Windows任务均已恢复运行：采集、数据库导入、影子预测和两个备份任务的任务状态为Ready，影子任务最后一次返回码为0。
 - 正式库已应用迁移001至014；`records=200,688`、`unsupported_records=0`。
 - 市场层：`MarketSnapshot=1,454`、`BookmakerMarketRow=45,701`、`SnapshotBatch=393`、`SnapshotEligibilityAssessment=393`。
 - 赛果层：`ResultCandidate=58`、`VerifiedResult=46`、`current_verified_results=46`、`current_invalid_fixtures=1`。自动验证38场，负责人声明8场。
 - 模型合格快照：`T-48h=8`、`T-24h=32`、`T-12h=38`、`T-6h=50`、`T-3h/T-60m/T-30m/T-10m=48`。
 - 严格快照与有效赛果交集：`T-48h=8`、`T-24h=29`、`T-12h=34`、`T-6h/T-3h/T-60m/T-30m/T-10m=45`。
-- 研究层：1个数据集、1个模型版本、1个激活版本、23条影子预测（10条legacy、13条D-030分层记录）、3条影子评估、1条K1历史复现；K1前向assessment当前为0。
+- 研究层：1个数据集、1个模型版本、1个激活版本、25条影子预测、3条影子评估、1条K1历史复现；K1前向assessment当前为0。2026-07-21新增的自然影子预测均早于K1策略生效时间，不补评。
 - 10条旧影子预测涉及4个fixture且均已有自动赛果；小样本Log Loss为1.1828、方向命中率40%，不能形成校准结论。
 - 当前9个赛事ID全部命中D-030注册表：欧冠/欧罗巴/世界杯为A，韩职/美职足/瑞超/挪超/巴甲为B，芬超为C；全部仍为 `provisional`。
 - D-031新增测试与既有测试全部通过，包含真实PostgreSQL迁移、首次/重复导入和空库schema重建；dry-run验证迁移数、research记录数和文件数均零变化。
@@ -56,8 +56,8 @@
 - 中国体彩官方scope证据已取得，但官方清单/head接口仍受EdgeOne 567影响；首次完整成功前，官方来源子窗口不能起算。
 - 本地PostgreSQL使用trust认证且只绑定 `127.0.0.1:55432`，不得转发或暴露。
 - ECS只有40GB系统盘且没有正式数据盘；至少100GB数据盘、私有OSS恢复闭环和重新授权迁移前，云端timer必须保持禁用。
-- K1规则源码和策略必须保持干净Git提交；相关路径为dirty时只能生成`unavailable/relevant_source_not_reproducible`。
-- 策略`effective_at=2026-07-22T00:00:00Z`，部署时仍在未来10分钟以上。当前0条前向assessment，没有规则达到active启用条件。
+- K1规则源码已提交为`9da04a0`且相关路径干净；若未来相关路径再次dirty，只能生成`unavailable/relevant_source_not_reproducible`。
+- 策略`effective_at=2026-07-22T00:00:00Z`已生效。当前0条前向assessment，需等待生效后的自然K1 cutoff；没有规则达到active启用条件。
 - 广泛赛事可能缺少某类盘口；来源缺盘必须继续与程序失败分开统计。
 
 ## 人工待办
@@ -70,7 +70,7 @@
 
 ## Agent 唯一下一步
 
-观察`effective_at`之后的首个自然K1 assessment，核对prediction/assessment同批JSONL、completed manifest、数据库引用、同公司差值和`proposed_action`；随后运行前向评估确认仍为`review_eligible=false`。不得补发旧预测或改变当前概率和置信。
+观察生效后的首个自然K1 assessment，核对prediction/assessment同批JSONL、completed manifest、数据库引用、同公司差值和`proposed_action`；随后运行前向评估确认仍为`review_eligible=false`。不得补发旧预测或改变当前概率和置信。
 
 同时继续核验D-030上线后的自然影子记录，并保持体彩官方补偿每日最多一次，不扩大访问频率；阿里云ECS所有timer继续禁用。
 
