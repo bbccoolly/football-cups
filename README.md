@@ -109,6 +109,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\local_postgr
 
 `shadow-predict` 只在真实切点窗口追加记录；窗口外返回 `unchanged`，不能历史补发。最新影子事实位于 `data/research/normalized/shadow-predictions/`，完整赛事分层、评估和任务说明见 `docs/research-data-acquisition-plan.md`。
 
+韩职K1可在不写入事实层的前提下查看当前分析或历史as-of回放：
+
+```powershell
+.\.venv\Scripts\football-cups-research.exe analyze-k1 `
+  --workspace . --fixture-id <id> --latest-available-target --format detailed --dry-run
+.\.venv\Scripts\football-cups-research.exe blind-test-k1-guardrail `
+  --workspace . --fixture-id <id> --target T-10m
+```
+
+报告会分别展示基础概率、输入更新状态、数据/规则覆盖、历史closing背景和护栏后研究方案。盲测默认不读取赛果；只有显式传入`--reveal-result`才在冻结判断后附加90分钟赛果，且始终不写JSONL或数据库。
+
 欧冠/欧罗巴盘口差异护栏是独立的 research-only shadow 记录，不训练或激活模型，也不修改基础胜平负概率：
 
 ```powershell

@@ -89,6 +89,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\configure_da
 
 当前数据库任务名为 `FootballCups-Database-Import`。同一配置脚本还会注册 `FootballCups-Research-Shadow-Prediction`，每2分钟运行一次 `shadow-predict` 并随后执行研究 `db-import`。专用账户属于内置 `Users` 但不属于 `Administrators`，只获得代码和 Python 基础运行时读取/执行、`data/` 修改及 `.env` 读取权限。任务使用 Task Scheduler `Password` 登录类型，随机凭据只由 Windows LSA 加密保存，不进入任务 XML、文件或日志。任务会先启动本地 PostgreSQL，再运行对应导入命令。不得改用管理员组账户伪装完成重启验收。
 
+根据D-034，影子任务在每日04:00 Asia/Shanghai后首次成功运行时还会执行一次K1前向评估检查，并在第二次`football-cups-research db-import`成功后才更新`data/research/state/k1-forward-evaluation-schedule.json`。自动赛果证据未变化时不新增评估事实；状态损坏、评估失败或第二次导入失败均不得推进日期，下一轮任务重试。该步骤不应用迁移、不增加500访问，也不影响已经完成的shadow发布和第一次导入。
+
 当前独立主机实测拒绝管理员为另一个本地标准账户注册 S4U，即使已授予批处理登录权；因此 D-021 接受上述本机密码登录兼容路径。若迁移到域账户或新的 Windows 主机，应重新评估能否恢复 S4U，而不是复制现有本机凭据。卸载：
 
 ```powershell
