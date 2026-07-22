@@ -17,7 +17,18 @@ from football_cups.research.k1_guardrail import (
     select_k1_batch_as_of,
     verify_shadow_manifest,
     unavailable_assessment,
+    _forward_descriptive_metrics,
+    _guardrail_risk_metrics,
 )
+from football_cups.research.k1_analysis_workflow import (
+    canonical_decimal,
+    canonical_market_fingerprint,
+    classify_market_update,
+    direction_strength_label,
+    load_k1_analysis_workflow,
+    sample_maturity,
+)
+from football_cups.research.competition_profiles import load_competition_registry
 from football_cups.research.config import ResearchConfig
 from football_cups.research.storage import ResearchStore
 from football_cups.database.config import DatabaseConfig
@@ -26,6 +37,73 @@ from football_cups.research.database import import_research_files
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_k1_analysis_workflow_and_pure_classification() -> None:
+    workflow = load_k1_analysis_workflow(ROOT)
+    registry = load_competition_registry(ROOT)
+    assert workflow.workflow_version == "k1-analysis-flow-v2"
+    assert workflow.daily_evaluation["timezone"] == "Asia/Shanghai"
+    assert canonical_decimal("2.5000") == "2.5"
+    assert canonical_decimal("0.00") == "0"
+    first = canonical_market_fingerprint(
+        [
+            {"source_bookmaker_name": "B", "current_home": "2.00"},
+            {"source_bookmaker_name": "A", "current_home": 1.9},
+        ],
+        fields=("current_home",),
+    )
+    second = canonical_market_fingerprint(
+        [
+            {"current_home": "1.900", "source_bookmaker_name": "A"},
+            {"current_home": 2, "source_bookmaker_name": "B"},
+        ],
+        fields=("current_home",),
+    )
+    assert first == second
+    current = {name: name for name in ("base_ouzhi", "guardrail_ouzhi", "guardrail_yazhi", "guardrail_daxiao")}
+    assert classify_market_update(current, None) == ("not_available", [])
+    assert classify_market_update(current, current) == ("unchanged", [])
+    previous = dict(current, guardrail_daxiao="old")
+    assert classify_market_update(current, previous) == ("partial_update", ["guardrail_daxiao"])
+    previous = {name: "old" for name in current}
+    assert classify_market_update(current, previous)[0] == "full_update"
+    assert direction_strength_label(0.15, registry.confidence_policy) == "strong"
+    assert direction_strength_label(0.07, registry.confidence_policy) == "moderate"
+    assert direction_strength_label(0.069, registry.confidence_policy) == "weak"
+    assert sample_maturity(
+        automatic_fixture_count=29, span_days=100, diagnostic_minimum=30,
+        sample_gate_minimum=200, sample_gate_span_days=90,
+    ) == "unvalidated"
+    assert sample_maturity(
+        automatic_fixture_count=200, span_days=89, diagnostic_minimum=30,
+        sample_gate_minimum=200, sample_gate_span_days=90,
+    ) == "provisional"
+    assert sample_maturity(
+        automatic_fixture_count=200, span_days=90, diagnostic_minimum=30,
+        sample_gate_minimum=200, sample_gate_span_days=90,
+    ) == "sample_gate_met"
+
+
+def test_forward_metrics_keep_probability_and_guardrail_risk_separate() -> None:
+    rows = [
+        {
+            "probabilities": {"home": 0.6, "draw": 0.2, "away": 0.2},
+            "home_goals": 0, "away_goals": 1, "proposed_action": "abstain",
+        },
+        {
+            "probabilities": {"home": 0.5, "draw": 0.3, "away": 0.2},
+            "home_goals": 1, "away_goals": 0, "proposed_action": "keep",
+        },
+    ]
+    metrics = _forward_descriptive_metrics(rows)
+    assert metrics["fixture_count"] == 2
+    assert metrics["direction_hit_count"] == 1
+    assert metrics["ece"]["status"] == "insufficient_sample"
+    risk = _guardrail_risk_metrics(rows)
+    assert risk["base_wrong_direction_count"] == 1
+    assert risk["abstain_avoided_wrong_count"] == 1
+    assert risk["error_capture_rate"] == 1.0
 
 
 def test_policy_rejects_active_status(tmp_path: Path) -> None:

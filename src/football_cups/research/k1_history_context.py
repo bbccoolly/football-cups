@@ -28,6 +28,7 @@ class K1AnalysisPresentation:
     direction_gap_bins: tuple[float, ...]
     rule_labels: dict[str, str]
     status_labels: dict[str, str]
+    workflow_labels: dict[str, str]
     file_sha256: str
     canonical_sha256: str
 
@@ -41,7 +42,7 @@ def load_k1_analysis_presentation(workspace: Path) -> K1AnalysisPresentation:
         raise K1GuardrailError(f"invalid K1 analysis presentation: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise K1GuardrailError("unsupported K1 analysis presentation schema")
-    if payload.get("presentation_version") != "k1-analysis-presentation-v1":
+    if payload.get("presentation_version") != "k1-analysis-presentation-v2":
         raise K1GuardrailError("unsupported K1 analysis presentation version")
     integers = {}
     for name in ("minimum_cohort_size", "minimum_season_size", "ece_minimum_size", "example_count", "bootstrap_iterations"):
@@ -63,10 +64,17 @@ def load_k1_analysis_presentation(workspace: Path) -> K1AnalysisPresentation:
         raise K1GuardrailError("K1 analysis bin contract mismatch")
     rule_labels = payload.get("rule_labels")
     status_labels = payload.get("status_labels")
+    workflow_labels = payload.get("workflow_labels")
     if not isinstance(rule_labels, dict) or len(rule_labels) != 8:
         raise K1GuardrailError("all K1 rule labels are required")
     if status_labels != {"matched": "触发", "not_matched": "未触发", "not_evaluable": "不可评估"}:
         raise K1GuardrailError("invalid K1 status labels")
+    required_workflow_labels = {
+        "not_available", "unchanged", "partial_update", "full_update", "complete", "limited",
+        "unvalidated", "provisional", "sample_gate_met", "legacy_analysis_flow",
+    }
+    if not isinstance(workflow_labels, dict) or set(workflow_labels) != required_workflow_labels:
+        raise K1GuardrailError("invalid K1 workflow labels")
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return K1AnalysisPresentation(
         payload=payload, version=payload["presentation_version"],
@@ -76,6 +84,7 @@ def load_k1_analysis_presentation(workspace: Path) -> K1AnalysisPresentation:
         wilson_confidence=confidences[0], bootstrap_confidence=confidences[1],
         bootstrap_iterations=integers["bootstrap_iterations"], probability_bins=probability_bins,
         direction_gap_bins=gap_bins, rule_labels=dict(rule_labels), status_labels=dict(status_labels),
+        workflow_labels=dict(workflow_labels),
         file_sha256=hashlib.sha256(content).hexdigest(),
         canonical_sha256=hashlib.sha256(canonical).hexdigest(),
     )
@@ -478,11 +487,17 @@ def _rule_threshold(rule: str, thresholds: Mapping[str, Any]) -> str:
 
 
 def render_k1_analysis(result: Mapping[str, Any], *, workspace: Path, summary: bool = False, audit: bool = False) -> str:
+    presentation = load_k1_analysis_presentation(workspace)
     context = result["analysis_context"]
     base = result["base_prediction"]
     history = result["historical_context"]
     guardrail = result["guardrail_assessment"]
     guarded = result["guarded_output"]
+    confidence = base.get("confidence_interpretation") or {}
+    maturity = base.get("sample_maturity") or {"status": "unvalidated"}
+    market_update = context.get("market_update") or {"status": "not_available"}
+    input_quality = guardrail.get("input_quality") or {}
+    evaluability = guardrail.get("rule_evaluability") or {}
     lines = [
         f"# {context['home_team_name']} vs {context['away_team_name']}",
         "",
@@ -494,9 +509,37 @@ def render_k1_analysis(result: Mapping[str, Any], *, workspace: Path, summary: b
         "| ---: | ---: | ---: | --- | --- |",
         f"| {_pct(base['probabilities']['home'])} | {_pct(base['probabilities']['draw'])} | {_pct(base['probabilities']['away'])} | {_direction_label(base['direction'])} | {base['confidence_label']} |",
         "",
-        "## 历史证据上下文",
+        "## 置信与样本成熟度",
+        "",
+        "| 方向强度 | 公司数 | 公司MAD | 原始置信 | 最终置信 | 自动样本 | 跨度 | 样本状态 |",
+        "| --- | ---: | ---: | --- | --- | ---: | ---: | --- |",
+        f"| {confidence.get('direction_strength_label', 'unknown')}（{_number(confidence.get('direction_strength'))}） | "
+        f"{confidence.get('bookmaker_count', 0)} | {_number(confidence.get('bookmaker_dispersion'))} | "
+        f"{confidence.get('raw_confidence_label', base['confidence_label'])} | {confidence.get('final_confidence_label', base['confidence_label'])} | "
+        f"{maturity.get('automatic_verified_fixture_count_as_of', 0)} | {_number(maturity.get('automatic_evaluation_span_days_as_of'))}天 | "
+        f"{presentation.workflow_labels.get(maturity.get('status'), maturity.get('status'))} |",
+        "",
+        "## 切点新增信息",
+        "",
+        f"状态：{presentation.workflow_labels.get(market_update.get('status'), market_update.get('status'))}；"
+        f"前序切点：{market_update.get('previous_target') or '无'}；比较来源：{market_update.get('comparison_time_source', 'not_available')}。",
         "",
     ]
+    if market_update.get("status") == "unchanged":
+        lines.extend(["本切点没有新增盘口数值输入，结论与上一切点高度相关，不得视为一份独立市场证据。", ""])
+    elif market_update.get("status") == "partial_update":
+        lines.extend([f"本切点存在部分新增盘口信息；变化组件：{', '.join(market_update.get('changed_components') or [])}。", ""])
+    elif market_update.get("status") == "full_update":
+        lines.extend(["基础欧赔及三个护栏市场输入均发生变化。", ""])
+    lines.extend([
+        f"核心输入：{presentation.workflow_labels.get(input_quality.get('core_input_quality'), input_quality.get('core_input_quality', 'unknown'))}；"
+        f"辅助覆盖：{presentation.workflow_labels.get(input_quality.get('auxiliary_rule_coverage'), input_quality.get('auxiliary_rule_coverage', 'unknown'))}；"
+        f"R4有效公司={evaluability.get('r4_valid_bookmaker_count', 0)}；"
+        f"R5响应={evaluability.get('r5_distinct_response_count', 0)}，跨度={evaluability.get('r5_observation_span_seconds', 0)}秒。",
+        "",
+        "## 历史证据上下文",
+        "",
+    ])
     if history.get("status") != "available":
         lines.append(f"历史上下文不可用：{history.get('reason', 'unknown')}。基础预测与护栏结果不受影响。")
     else:
@@ -513,7 +556,6 @@ def render_k1_analysis(result: Mapping[str, Any], *, workspace: Path, summary: b
         matched = [name for name, value in guardrail["rule_evaluations"].items() if value.get("status") == "matched"]
         unavailable = [name for name, value in guardrail["rule_evaluations"].items() if value.get("status") == "not_evaluable"]
     else:
-        presentation = load_k1_analysis_presentation(workspace)
         lines.extend(["## R0-R6执行详情", "", "| 规则 | 名称 | 状态 | 当前证据 | 阈值 | 历史可比性 |", "| --- | --- | --- | --- | --- | --- |"])
         proxies = history.get("rule_proxy_context") or {}
         features = guardrail["features"]
@@ -523,9 +565,13 @@ def render_k1_analysis(result: Mapping[str, Any], *, workspace: Path, summary: b
             if proxy.get("fixture_count") is not None:
                 historical += f"（{proxy['fixture_count']}场）"
             rule_id = {"r2_asian_retreat": "R2a", "r2_euro_strong_asian_flat": "R2b"}.get(rule, rule.split("_", 1)[0].upper())
+            observation = _rule_observation(rule, features)
+            reasons = ",".join(evaluation.get("reasons") or [])
+            if reasons:
+                observation += f"；原因={reasons}"
             lines.append(
                 f"| {rule_id} | {presentation.rule_labels[rule]} | {presentation.status_labels[evaluation['status']]} | "
-                f"{_rule_observation(rule, features)} | {_rule_threshold(rule, guardrail['thresholds'])} | {historical} |"
+                f"{observation} | {_rule_threshold(rule, guardrail['thresholds'])} | {historical} |"
             )
         if history.get("status") == "available":
             lines.extend(["", "## 分赛季历史表现", "", "| 赛季 | 样本 | 最高方向命中率 | 平局率 | 校准残差 |", "| --- | ---: | ---: | ---: | ---: |"])

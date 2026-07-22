@@ -27,6 +27,8 @@ abstain    数据不可信，或多个独立市场同时反对当前方向
 
 根据D-033，人工分析可额外展示截止前可用的历史closing上下文。历史数据按冻结分箱选择不少于30场的最具体cohort，报告整体、赛季、规则代理和5场样例；它固定为证据解释层，不修改当前概率或护栏动作。历史回放还必须满足`label_available_at <= prediction_cutoff`。
 
+根据D-034，基础欧赔概率输入与护栏输入必须分别哈希：基础指纹只覆盖实际参与去水共识的即时欧赔，护栏指纹覆盖opening稳定性排除后的欧赔、亚盘和大小球行。相邻切点只比较冻结输入并标记`unchanged/partial_update/full_update`；该状态只说明输入变化，不调整R1-R6或基础概率。R4/R5的不可评估原因、发布时自动样本成熟度和前向错误捕获指标均属于research-only审计字段。
+
 ### 1.1 As-of close
 
 `opening`来自最终选中 V2 公司行的来源开盘字段；`close`来自预测 cutoff 前且在合法发布时间内已经完成的最后一个模型合格批次的 `current_*`。自然预测以实际 `published_at` 为可用时间，未发布历史模拟以 `min(cutoff+10m,kickoff-1m)` 为可用时间。不得跨 target 或批次拼接。多段响应只用于 opening 稳定性和同 target R5。

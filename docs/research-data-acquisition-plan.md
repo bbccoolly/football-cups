@@ -175,6 +175,8 @@ scripts\windows\install_shadow_prediction_task.ps1 -Workspace .
 
 迁移014已启用D-031 K1规则护栏shadow层。`evaluate-k1-guardrail-history`复现330场聚合资产，但固定标记`historical_exact_evaluable=false`，不构造公司一致率、精确R1/R2、R4或R5。精确assessment只从`prediction_cutoff >= effective_at`的未来live V2自然发布产生；shadow只记录拟议动作，不修改概率、置信或发布状态。
 
+D-034增加`research-k1-analysis-workflow.json`。未来K1 assessment冻结基础欧赔输入和护栏三市场输入的独立canonical哈希，并与前一自然切点比较`unchanged/partial_update/full_update`；模拟回放只读展示时必须标记模拟前序来源。工作流字段不参与R0-R6动作。`evaluate-k1-guardrail-forward`输出V2概率评分、均匀基线、风险捕获和自动/人工拆分，只有自动证据集合哈希变化才写入新评估。
+
 ```powershell
 .\.venv\Scripts\football-cups-research.exe evaluate-k1-guardrail-history --workspace .
 .\.venv\Scripts\football-cups-research.exe evaluate-k1-guardrail-forward --workspace . --channel research-shadow-v1

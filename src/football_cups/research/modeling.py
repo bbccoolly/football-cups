@@ -24,6 +24,7 @@ from .competition_profiles import (
     load_competition_registry,
     market_statistics,
 )
+from .k1_analysis_workflow import canonical_market_fingerprint
 from .k1_guardrail import (
     collect_k1_guardrail_assessment,
     load_k1_guardrail_policy,
@@ -449,7 +450,11 @@ def _identity_as_of(connection, fixture_id: str, target: str) -> dict[str, Any] 
     return dict(row) if row is not None else None
 
 
-def _automatic_evaluation_stats(connection, channel: str) -> dict[tuple[str, str], dict[str, Any]]:
+def _automatic_evaluation_stats(
+    connection,
+    channel: str,
+    available_at: datetime | None = None,
+) -> dict[tuple[str, str], dict[str, Any]]:
     rows = connection.execute(
         """
         SELECT prediction.competition_id, prediction.target,
@@ -465,9 +470,10 @@ def _automatic_evaluation_stats(connection, channel: str) -> dict[tuple[str, str
           AND result.verification_method NOT IN (
               'manual', 'manual-import', 'project-owner-manual-declaration'
           )
+          AND (%s IS NULL OR result.confirmed_at <= %s)
         GROUP BY prediction.competition_id, prediction.target
         """,
-        (channel,),
+        (channel, available_at, available_at),
     ).fetchall()
     result: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
@@ -497,6 +503,7 @@ def _live_1x2_consensus(connection, fixture_id: str, target: str, snapshot_recor
         (fixture_id, target, snapshot_record_id, cutoff),
     ).fetchall()
     probabilities: dict[str, tuple[float, float, float]] = {}
+    selected_rows: dict[str, dict[str, Any]] = {}
     max_observed_at = None
     for row in rows:
         bookmaker = str(row["source_bookmaker_name"] or "").strip()
@@ -505,6 +512,7 @@ def _live_1x2_consensus(connection, fixture_id: str, target: str, snapshot_recor
         )
         if bookmaker and probability is not None:
             probabilities[bookmaker] = probability
+            selected_rows[bookmaker] = dict(row)
             if max_observed_at is None or row["observed_at"] > max_observed_at:
                 max_observed_at = row["observed_at"]
     consensus = None
@@ -519,6 +527,10 @@ def _live_1x2_consensus(connection, fixture_id: str, target: str, snapshot_recor
         "market_observed_at": iso_utc(max_observed_at) if max_observed_at else None,
         "direction_strength": direction_strength,
         "bookmaker_dispersion": bookmaker_dispersion,
+        "base_1x2_input_fingerprint": canonical_market_fingerprint(
+            selected_rows.values(),
+            fields=("current_home", "current_draw", "current_away"),
+        ),
     }
     if consensus:
         features["log_home_draw"] = math.log(consensus[0] / consensus[1])
@@ -581,7 +593,7 @@ def publish_shadow_predictions(
         ).fetchone()
         if activation is None:
             raise ResearchModelError(f"no active research model activation for channel {channel}")
-        evaluation_stats = _automatic_evaluation_stats(connection, channel)
+        evaluation_stats = _automatic_evaluation_stats(connection, channel, observed_now)
         batches = _live_batch_rows(connection, targets, observed_now, lookahead_hours, lookback_hours)
         for batch in batches:
             target = str(batch["target"])

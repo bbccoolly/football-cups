@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "presentation_version": "k1-analysis-presentation-v1",
+  "presentation_version": "k1-analysis-presentation-v2",
   "minimum_cohort_size": 30,
   "minimum_season_size": 30,
   "ece_minimum_size": 100,
@@ -24,5 +24,17 @@
     "matched": "触发",
     "not_matched": "未触发",
     "not_evaluable": "不可评估"
+  },
+  "workflow_labels": {
+    "not_available": "无前序切点",
+    "unchanged": "输入未变化",
+    "partial_update": "部分输入更新",
+    "full_update": "完整输入更新",
+    "complete": "核心输入完整",
+    "limited": "辅助规则覆盖不足",
+    "unvalidated": "样本不足",
+    "provisional": "观察中",
+    "sample_gate_met": "样本门槛满足",
+    "legacy_analysis_flow": "历史流程记录"
   }
 }

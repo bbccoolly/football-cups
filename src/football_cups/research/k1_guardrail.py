@@ -14,9 +14,26 @@ from typing import Any, Iterable, Mapping
 
 from football_cups.collector.markets import market_row_role
 from football_cups.collector.config import CUTOFFS
+from football_cups.collector.results import load_competition_formats
 
-from .competition_profiles import market_statistics, valid_sha256
+from .competition_profiles import (
+    confidence_assessment,
+    load_competition_registry,
+    market_statistics,
+    valid_sha256,
+)
 from .config import ResearchConfig
+from .k1_analysis_workflow import (
+    PREVIOUS_TARGET,
+    UPDATE_COMPONENTS,
+    K1AnalysisWorkflow,
+    canonical_market_fingerprint,
+    classify_market_update,
+    direction_strength_label,
+    load_k1_analysis_workflow,
+    probability_delta,
+    sample_maturity,
+)
 from .storage import ResearchStore, research_facts_lock, stable_id
 
 
@@ -27,9 +44,13 @@ TARGETS = frozenset({"T-24h", "T-6h", "T-60m", "T-10m"})
 ACTIONS = frozenset({"keep", "caution", "downgrade", "abstain"})
 RULE_STATES = frozenset({"matched", "not_matched", "not_evaluable"})
 RELEVANT_PATHS = (
-    "src/football_cups/research",
+    "src/football_cups/research/k1_guardrail.py",
+    "src/football_cups/research/k1_analysis_workflow.py",
+    "src/football_cups/research/modeling.py",
+    "src/football_cups/research/competition_profiles.py",
     "src/football_cups/database/migrations/014_research_k1_guardrail_assessments.sql",
     "config/research-k1-guardrail.json",
+    "config/research-k1-analysis-workflow.json",
 )
 
 
@@ -352,6 +373,29 @@ def build_guardrail_features(
         "prob_gap": direction,
         "bookmaker_dispersion": dispersion,
         "source_row_record_ids": sorted(str(row.get("record_id")) for rows in markets.values() for row in rows.values()),
+        "guardrail_input_fingerprints": {
+            market: canonical_market_fingerprint(
+                (
+                    {**dict(row), "line_movement": row.get("line_movement") or "none"}
+                    for row in selected.values()
+                ),
+                fields={
+                    "ouzhi": (
+                        "opening_home", "opening_draw", "opening_away",
+                        "current_home", "current_draw", "current_away",
+                    ),
+                    "yazhi": (
+                        "opening_home", "opening_line", "opening_away",
+                        "current_home", "current_line", "current_away", "line_movement",
+                    ),
+                    "daxiao": (
+                        "opening_over", "opening_line", "opening_under",
+                        "current_over", "current_line", "current_under", "line_movement",
+                    ),
+                }[market],
+            )
+            for market, selected in markets.items()
+        },
     }
     if favorite_index in {0, 2}:
         opponent_index = 2 if favorite_index == 0 else 0
@@ -401,16 +445,25 @@ def build_guardrail_features(
         handicap_rows,
         ("handicap_line", "home_probability", "draw_probability", "away_probability"),
     )
+    zero_line_count = 0
+    direction_mismatch_count = 0
+    invalid_probability_count = 0
     if favorite_index in {0, 2}:
         for row in handicap_selected.values():
             line = _decimal(row.get("handicap_line"))
             probabilities = [_decimal(row.get(key)) for key in ("home_probability", "draw_probability", "away_probability")]
-            if line is None or line == 0 or any(value is None or value < 0 for value in probabilities):
+            if line is None or any(value is None or value < 0 for value in probabilities):
+                invalid_probability_count += 1
+                continue
+            if line == 0:
+                zero_line_count += 1
                 continue
             if (favorite_index == 0 and line >= 0) or (favorite_index == 2 and line <= 0):
+                direction_mismatch_count += 1
                 continue
             total = sum(probabilities)  # type: ignore[arg-type]
             if total <= 0:
+                invalid_probability_count += 1
                 continue
             normalized = [value / total for value in probabilities]  # type: ignore[operator]
             cover = normalized[favorite_index]
@@ -420,6 +473,12 @@ def build_guardrail_features(
         "handicap_index_valid_bookmakers": len(handicap_valid),
         "handicap_index_conflicts": handicap_conflicts,
         "handicap_index_conflict_support_ratio": _ratio(sum(value >= margin for value in handicap_valid), len(handicap_valid)),
+        "r4_raw_row_count": len(handicap_rows),
+        "r4_bookmaker_row_count": len(handicap_selected),
+        "r4_zero_line_count": zero_line_count,
+        "r4_direction_mismatch_count": direction_mismatch_count,
+        "r4_invalid_probability_count": invalid_probability_count,
+        "r4_valid_bookmaker_count": len(handicap_valid),
         "live_observation_count": 1,
         "live_observation_span_seconds": 0,
         "live_line_range": None,
@@ -474,6 +533,26 @@ def assess_guardrail_features(features: Mapping[str, Any], policy: K1GuardrailPo
         "r6_bookmaker_dispersion": "matched" if r6 else "not_matched",
     }
     rules = {name: {"status": status, "reasons": []} for name, status in values.items()}
+    if r4_status == "not_evaluable":
+        r4_reasons = []
+        if not directional:
+            r4_reasons.append("favorite_not_directional")
+        if int(features.get("r4_invalid_probability_count", 0)):
+            r4_reasons.append("invalid_handicap_probability")
+        if int(features.get("r4_direction_mismatch_count", 0)):
+            r4_reasons.append("unsupported_handicap_direction")
+        if handicap_count < int(t["minimum_bookmakers_per_market"]):
+            r4_reasons.append("insufficient_handicap_index_bookmakers")
+        rules["r4_handicap_cover_conflict"]["reasons"] = sorted(set(r4_reasons))
+    if not r5_evaluable:
+        r5_reasons = []
+        if not directional:
+            r5_reasons.append("favorite_not_directional")
+        if observation_count < int(t["live_observation_count"]):
+            r5_reasons.append("insufficient_distinct_responses")
+        if observation_span < int(t["live_observation_span_seconds"]):
+            r5_reasons.append("insufficient_observation_span")
+        rules["r5_live_market_stability"]["reasons"] = sorted(set(r5_reasons))
     flags = sorted(name for name, status in values.items() if status == "matched")
     primary = r1 or r2_retreat
     independent = r3 or r4_status == "matched" or r6
@@ -558,6 +637,23 @@ def validate_assessment_record(record: Mapping[str, Any]) -> None:
     assessed_at = _utc(record.get("assessed_at"), "assessed_at")
     if effective is None or cutoff < effective or assessed_at < cutoff:
         raise K1GuardrailError("K1 assessment violates policy time boundary")
+    raw_features = record.get("raw_features") or {}
+    workflow = raw_features.get("analysis_workflow") or {}
+    if workflow:
+        required_workflow = {
+            "workflow_version", "workflow_effective_at", "workflow_file_sha256",
+            "workflow_canonical_sha256", "active_at_cutoff",
+        }
+        if not required_workflow.issubset(workflow):
+            raise K1GuardrailError("K1 assessment has incomplete analysis workflow")
+        if workflow.get("workflow_version") != "k1-analysis-flow-v2":
+            raise K1GuardrailError("K1 assessment has unsupported analysis workflow")
+        if not valid_sha256(workflow.get("workflow_file_sha256")) or not valid_sha256(workflow.get("workflow_canonical_sha256")):
+            raise K1GuardrailError("K1 assessment has invalid analysis workflow hash")
+        if not isinstance(raw_features.get("base_input_fingerprint"), dict) or not isinstance(raw_features.get("guardrail_input_fingerprints"), dict):
+            raise K1GuardrailError("K1 assessment has incomplete workflow fingerprints")
+        if not isinstance(raw_features.get("market_update"), dict) or raw_features["market_update"].get("status") not in {"not_available", "unchanged", "partial_update", "full_update"}:
+            raise K1GuardrailError("K1 assessment has invalid market update status")
     if record.get("audit_status") == "eligible":
         policy = K1GuardrailPolicy(
             path=Path("<embedded>"),
@@ -623,7 +719,13 @@ def verify_shadow_manifest(research_dir: Path, record_path: Path) -> None:
     content = record_path.read_bytes()
     records = [json.loads(line) for line in content.splitlines() if line.strip()]
     expected_path = record_path.relative_to(research_dir).as_posix()
-    has_guardrail = any(record.get("record_type") == "ResearchK1GuardrailAssessment" for record in records)
+    has_guardrail = any(
+        record.get("record_type") in {
+            "ResearchK1GuardrailAssessment",
+            "ResearchEuropeGuardrailAssessment",
+        }
+        for record in records
+    )
     if not has_guardrail and "record_sha256" not in manifest:
         if manifest.get("status") != "completed" or manifest.get("record_path") != expected_path:
             raise K1GuardrailError(f"legacy shadow prediction manifest mismatch: {run_id}")
@@ -637,6 +739,12 @@ def verify_shadow_manifest(research_dir: Path, record_path: Path) -> None:
         "prediction_count": manifest.get("prediction_count") == sum(record.get("record_type") == "ResearchShadowPrediction" for record in records),
         "assessment_count": manifest.get("assessment_count") == sum(record.get("record_type") == "ResearchK1GuardrailAssessment" for record in records),
     }
+    if "europe_assessment_count" in manifest or any(
+        record.get("record_type") == "ResearchEuropeGuardrailAssessment" for record in records
+    ):
+        checks["europe_assessment_count"] = manifest.get("europe_assessment_count") == sum(
+            record.get("record_type") == "ResearchEuropeGuardrailAssessment" for record in records
+        )
     failed = sorted(name for name, passed in checks.items() if not passed)
     if failed:
         raise K1GuardrailError(f"shadow prediction manifest mismatch ({run_id}): {', '.join(failed)}")
@@ -696,7 +804,8 @@ def _trajectory_features(
     if favorite_side not in {"home", "away"}:
         return {"live_observation_count": 0, "live_observation_span_seconds": 0,
                 "live_line_range": None, "live_probability_range": None,
-                "live_response_set_hashes": []}
+                "live_response_set_hashes": [], "r5_raw_response_count": 0,
+                "r5_distinct_response_count": 0, "r5_duplicate_response_count": 0}
     batches = connection.execute(
         """
         SELECT record_id, completed_at, core_observed_at, market_results
@@ -708,6 +817,7 @@ def _trajectory_features(
         (fixture_id, target, cutoff, available_at),
     ).fetchall()
     observations: dict[str, tuple[datetime, float, float]] = {}
+    duplicate_response_count = 0
     for raw_batch in batches:
         batch = dict(raw_batch)
         results = batch.get("market_results") or {}
@@ -723,6 +833,7 @@ def _trajectory_features(
             continue
         response_hash = hashlib.sha256(json.dumps([hashes[value] for value in ids], separators=(",", ":")).encode()).hexdigest()
         if response_hash in observations:
+            duplicate_response_count += 1
             continue
         euro_rows = [dict(row) for row in connection.execute(
             """SELECT record_id, source_bookmaker_name, current_home, current_draw, current_away, source_row_index
@@ -763,13 +874,222 @@ def _trajectory_features(
     if not ordered:
         return {"live_observation_count": 0, "live_observation_span_seconds": 0,
                 "live_line_range": None, "live_probability_range": None,
-                "live_response_set_hashes": []}
+                "live_response_set_hashes": [], "r5_raw_response_count": len(batches),
+                "r5_distinct_response_count": 0, "r5_duplicate_response_count": duplicate_response_count}
     return {
         "live_observation_count": len(ordered),
         "live_observation_span_seconds": int((ordered[-1][0] - ordered[0][0]).total_seconds()),
         "live_line_range": max(value[1] for value in ordered) - min(value[1] for value in ordered),
         "live_probability_range": max(value[2] for value in ordered) - min(value[2] for value in ordered),
         "live_response_set_hashes": sorted(observations),
+        "r5_raw_response_count": len(batches),
+        "r5_distinct_response_count": len(ordered),
+        "r5_duplicate_response_count": duplicate_response_count,
+    }
+
+
+def _workflow_snapshot(workflow: K1AnalysisWorkflow, cutoff: datetime) -> dict[str, Any]:
+    return {
+        "workflow_version": workflow.workflow_version,
+        "workflow_effective_at": workflow.effective_at.isoformat().replace("+00:00", "Z"),
+        "workflow_file_sha256": workflow.file_sha256,
+        "workflow_canonical_sha256": workflow.canonical_sha256,
+        "active_at_cutoff": cutoff >= workflow.effective_at,
+    }
+
+
+def _component_hashes(base_fingerprint: Mapping[str, Any], guardrail_fingerprints: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "base_ouzhi": str(base_fingerprint.get("sha256") or ""),
+        "guardrail_ouzhi": str((guardrail_fingerprints.get("ouzhi") or {}).get("sha256") or ""),
+        "guardrail_yazhi": str((guardrail_fingerprints.get("yazhi") or {}).get("sha256") or ""),
+        "guardrail_daxiao": str((guardrail_fingerprints.get("daxiao") or {}).get("sha256") or ""),
+    }
+
+
+def _market_update_payload(
+    *,
+    current_components: Mapping[str, str],
+    current_probabilities: Mapping[str, Any],
+    current_features: Mapping[str, Any],
+    previous_target: str | None,
+    previous_components: Mapping[str, str] | None,
+    previous_probabilities: Mapping[str, Any] | None,
+    previous_features: Mapping[str, Any] | None,
+    comparison_time_source: str,
+) -> dict[str, Any]:
+    status, changed = classify_market_update(current_components, previous_components)
+    current_side = current_features.get("favorite_side")
+    previous_side = previous_features.get("favorite_side") if previous_features else None
+    asian_delta = None
+    comparison_reason = None
+    if previous_features is not None:
+        if current_side == previous_side and current_side in {"home", "away"}:
+            current_line = current_features.get("current_favorite_line")
+            previous_line = previous_features.get("current_favorite_line")
+            if current_line is not None and previous_line is not None:
+                asian_delta = float(current_line) - float(previous_line)
+        elif current_side != previous_side:
+            comparison_reason = "favorite_direction_changed"
+    total_delta = None
+    if previous_features is not None:
+        current_total = current_features.get("current_total_line")
+        previous_total = previous_features.get("current_total_line")
+        if current_total is not None and previous_total is not None:
+            total_delta = float(current_total) - float(previous_total)
+    return {
+        "status": status,
+        "previous_target": previous_target,
+        "comparison_time_source": comparison_time_source,
+        "base_hash_current": current_components.get("base_ouzhi"),
+        "base_hash_previous": previous_components.get("base_ouzhi") if previous_components else None,
+        "guardrail_hashes_current": {
+            market: current_components.get(f"guardrail_{market}") for market in ("ouzhi", "yazhi", "daxiao")
+        },
+        "guardrail_hashes_previous": (
+            {market: previous_components.get(f"guardrail_{market}") for market in ("ouzhi", "yazhi", "daxiao")}
+            if previous_components else None
+        ),
+        "changed_components": changed,
+        "probability_delta": probability_delta(current_probabilities, previous_probabilities),
+        "asian_line_delta": asian_delta,
+        "total_line_delta": total_delta,
+        "comparison_reason": comparison_reason,
+    }
+
+
+def _stored_previous_workflow_context(
+    connection,
+    *,
+    prediction: Mapping[str, Any],
+    policy: K1GuardrailPolicy,
+    workflow: K1AnalysisWorkflow,
+) -> tuple[dict[str, str] | None, dict[str, Any] | None, dict[str, Any] | None, str]:
+    previous_target = PREVIOUS_TARGET.get(str(prediction.get("target")))
+    if previous_target is None:
+        return None, None, None, "not_available"
+    cutoff = _utc(prediction.get("prediction_cutoff"), "prediction_cutoff")
+    row = connection.execute(
+        """
+        SELECT prediction.probabilities, assessment.raw_features,
+               prediction.published_at, prediction.prediction_cutoff
+        FROM research.shadow_predictions AS prediction
+        JOIN research.current_k1_guardrail_assessments AS assessment
+          ON assessment.prediction_record_id=prediction.record_id
+        WHERE prediction.fixture_id=%s AND prediction.target=%s
+          AND prediction.status='published' AND prediction.prediction_cutoff < %s
+          AND assessment.policy_version=%s
+        ORDER BY prediction.prediction_cutoff DESC, prediction.record_id DESC
+        LIMIT 1
+        """,
+        (str(prediction.get("fixture_id")), previous_target, cutoff, policy.policy_version),
+    ).fetchone()
+    if row is None:
+        return None, None, None, "not_available"
+    row = dict(row)
+    raw_features = dict(row.get("raw_features") or {})
+    workflow_block = raw_features.get("analysis_workflow") or {}
+    if workflow_block.get("workflow_version") != workflow.workflow_version:
+        return None, None, None, "not_available"
+    base = raw_features.get("base_input_fingerprint") or {}
+    guardrail = raw_features.get("guardrail_input_fingerprints") or {}
+    components = _component_hashes(base, guardrail)
+    if any(not components.get(name) for name in UPDATE_COMPONENTS):
+        return None, None, None, "not_available"
+    return components, dict(row.get("probabilities") or {}), raw_features, "stored_prediction"
+
+
+def _workflow_enrichment(
+    connection,
+    *,
+    workspace: Path,
+    prediction: Mapping[str, Any],
+    policy: K1GuardrailPolicy,
+    workflow: K1AnalysisWorkflow,
+    features: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    hard_reasons: Iterable[str],
+) -> dict[str, Any]:
+    cutoff = _utc(prediction.get("prediction_cutoff"), "prediction_cutoff")
+    registry = load_competition_registry(workspace)
+    gate = registry.confidence_policy["high_confidence_gate"]
+    automatic_count = int(prediction.get("automatic_verified_fixture_count") or 0)
+    span_days = float(prediction.get("evaluation_span_days") or 0.0)
+    maturity = sample_maturity(
+        automatic_fixture_count=automatic_count,
+        span_days=span_days,
+        diagnostic_minimum=workflow.diagnostic_minimum_automatic_fixtures,
+        sample_gate_minimum=int(gate["minimum_automatic_verified_fixtures"]),
+        sample_gate_span_days=float(gate["minimum_span_days"]),
+    )
+    base_fingerprint = dict((prediction.get("features") or {}).get("base_1x2_input_fingerprint") or {})
+    guardrail_fingerprints = dict(features.get("guardrail_input_fingerprints") or {})
+    current_components = _component_hashes(base_fingerprint, guardrail_fingerprints)
+    previous_components, previous_probabilities, previous_features, comparison_source = _stored_previous_workflow_context(
+        connection, prediction=prediction, policy=policy, workflow=workflow,
+    )
+    market_update = _market_update_payload(
+        current_components=current_components,
+        current_probabilities=prediction.get("probabilities") or features.get("probabilities") or {},
+        current_features=features,
+        previous_target=PREVIOUS_TARGET.get(str(prediction.get("target"))),
+        previous_components=previous_components,
+        previous_probabilities=previous_probabilities,
+        previous_features=previous_features,
+        comparison_time_source=comparison_source,
+    )
+    rule_evaluations = assessment.get("rule_evaluations") or {}
+    not_evaluable = {
+        name: list(value.get("reasons") or [])
+        for name, value in rule_evaluations.items()
+        if value.get("status") == "not_evaluable"
+    }
+    core_complete = not list(hard_reasons) and (rule_evaluations.get("r0_data_integrity") or {}).get("status") != "matched"
+    auxiliary_complete = all(
+        (rule_evaluations.get(rule) or {}).get("status") != "not_evaluable"
+        for rule in ("r4_handicap_cover_conflict", "r5_live_market_stability")
+    )
+    direction = float(prediction.get("direction_strength") if prediction.get("direction_strength") is not None else features.get("prob_gap") or 0.0)
+    return {
+        "analysis_workflow": _workflow_snapshot(workflow, cutoff),
+        "base_input_fingerprint": base_fingerprint,
+        "guardrail_input_fingerprints": guardrail_fingerprints,
+        "market_update": market_update,
+        "confidence_interpretation": {
+            "raw_confidence_label": prediction.get("raw_confidence_label"),
+            "competition_confidence_cap": prediction.get("competition_confidence_cap"),
+            "final_confidence_label": prediction.get("confidence_label"),
+            "confidence_reasons": list(prediction.get("confidence_reasons") or []),
+            "direction_strength": direction,
+            "direction_strength_label": direction_strength_label(direction, registry.confidence_policy),
+            "bookmaker_count": int(prediction.get("bookmaker_count") or features.get("paired_bookmaker_count") or 0),
+            "bookmaker_dispersion": prediction.get("bookmaker_dispersion", features.get("bookmaker_dispersion")),
+        },
+        "sample_maturity": {
+            "automatic_verified_fixture_count_as_of": automatic_count,
+            "automatic_evaluation_span_days_as_of": span_days,
+            "status": maturity,
+        },
+        "input_quality": {
+            "core_input_quality": "complete" if core_complete else "invalid",
+            "auxiliary_rule_coverage": "complete" if auxiliary_complete else "limited",
+        },
+        "rule_evaluability": {
+            "evaluable_rule_count": sum(value.get("status") != "not_evaluable" for value in rule_evaluations.values()),
+            "not_evaluable_rule_count": len(not_evaluable),
+            "not_evaluable_reasons": not_evaluable,
+            "r4_raw_row_count": int(features.get("r4_raw_row_count", 0)),
+            "r4_bookmaker_row_count": int(features.get("r4_bookmaker_row_count", 0)),
+            "r4_zero_line_count": int(features.get("r4_zero_line_count", 0)),
+            "r4_direction_mismatch_count": int(features.get("r4_direction_mismatch_count", 0)),
+            "r4_invalid_probability_count": int(features.get("r4_invalid_probability_count", 0)),
+            "r4_valid_bookmaker_count": int(features.get("r4_valid_bookmaker_count", 0)),
+            "r5_raw_response_count": int(features.get("r5_raw_response_count", 0)),
+            "r5_distinct_response_count": int(features.get("r5_distinct_response_count", 0)),
+            "r5_observation_span_seconds": int(features.get("live_observation_span_seconds", 0)),
+            "r5_duplicate_response_count": int(features.get("r5_duplicate_response_count", 0)),
+            "opening_stability_excluded_by_market": dict(features.get("opening_stability_excluded_by_market") or {}),
+        },
     }
 
 
@@ -786,6 +1106,7 @@ def collect_k1_guardrail_assessment(
 ) -> dict[str, Any] | None:
     if str(prediction.get("competition_id") or "") != policy.competition_id:
         return None
+    workflow = load_k1_analysis_workflow(workspace)
     cutoff = _utc(prediction.get("prediction_cutoff"), "prediction_cutoff")
     published = _utc(prediction.get("published_at"), "published_at")
     assessed_at = assessed_at.astimezone(UTC)
@@ -840,7 +1161,8 @@ def collect_k1_guardrail_assessment(
                    opening_home, opening_draw, opening_away, opening_line,
                    opening_over, opening_under, current_home, current_draw,
                    current_away, current_line, current_over, current_under,
-                   source_row_index, source_page_sha256, source_workbook_sha256, observed_at
+                   source_row_index, source_page_sha256, source_workbook_sha256,
+                   line_movement, observed_at
             FROM football.current_bookmaker_market_rows
             WHERE fixture_id=%s AND target=%s AND market=%s
               AND source_snapshot_record_id=%s
@@ -894,6 +1216,13 @@ def collect_k1_guardrail_assessment(
                 hard_reasons.append("source_hash_mismatch:rangqiu")
     features, feature_reasons = build_guardrail_features(market_rows, handicap_rows, policy)
     features["opening_stability_warnings"] = opening_warnings
+    excluded_by_market: dict[str, list[str]] = {}
+    for warning in opening_warnings:
+        _, market, company = warning.split(":", 2)
+        excluded_by_market.setdefault(market, []).append(company)
+    features["opening_stability_excluded_by_market"] = {
+        market: sorted(companies) for market, companies in sorted(excluded_by_market.items())
+    }
     features["source_row_record_ids"] = sorted(set(features.get("source_row_record_ids", [])) | {str(row.get("record_id")) for row in handicap_rows})
     features.update(_trajectory_features(
         connection, fixture_id=str(prediction["fixture_id"]), target=str(prediction["target"]),
@@ -901,6 +1230,17 @@ def collect_k1_guardrail_assessment(
     ))
     hard_reasons.extend(feature_reasons)
     assessment = assess_guardrail_features(features, policy, hard_reasons)
+    if cutoff >= workflow.effective_at or not enforce_effective_at:
+        features.update(_workflow_enrichment(
+            connection,
+            workspace=workspace,
+            prediction=prediction,
+            policy=policy,
+            workflow=workflow,
+            features=features,
+            assessment=assessment,
+            hard_reasons=hard_reasons,
+        ))
     record_id = stable_id("research_k1_guardrail_assessment", prediction["record_id"], policy.policy_version)
     return {
         "schema_version": 1,
@@ -1051,8 +1391,16 @@ def _replay_one(
     policy: K1GuardrailPolicy,
     now: datetime,
     prefer_stored_prediction: bool,
+    include_previous_simulation: bool = True,
 ) -> dict[str, Any]:
-    from .modeling import _identity_as_of, _live_1x2_consensus, _prediction_cutoff, _deadline
+    from .modeling import (
+        _automatic_evaluation_stats,
+        _deadline,
+        _identity_as_of,
+        _live_1x2_consensus,
+        _prediction_cutoff,
+        _profile_fields,
+    )
 
     latest = connection.execute(
         """SELECT fixture_id, kickoff_at FROM football.fixture_identities
@@ -1095,6 +1443,11 @@ def _replay_one(
         publication_source = "stored_prediction"
         probabilities = dict(prediction.get("probabilities") or {})
         base_confidence = str(prediction.get("confidence_label") or "observation_only")
+        market_results = batch.get("market_results") or {}
+        snapshot_id = str(prediction.get("source_snapshot_record_id") or (market_results.get("ouzhi") or {}).get("snapshot_record_id") or "")
+        if snapshot_id:
+            _, replay_features = _live_1x2_consensus(connection, fixture_id, target, snapshot_id, cutoff)
+            prediction["features"] = {**dict(prediction.get("features") or {}), **replay_features}
         prediction["prediction_cutoff"] = cutoff.isoformat().replace("+00:00", "Z")
         prediction["published_at"] = available_at.isoformat().replace("+00:00", "Z")
     else:
@@ -1111,10 +1464,26 @@ def _replay_one(
         if consensus is None:
             raise K1GuardrailError("selected K1 batch lacks a valid 1X2 consensus")
         probabilities = {"home": consensus[0], "draw": consensus[1], "away": consensus[2], "sum": sum(consensus)}
-        direction = float(features.get("direction_strength") or 0)
-        dispersion = float(features.get("bookmaker_dispersion") or 0)
-        count = int(features.get("bookmaker_count") or 0)
-        base_confidence = "medium" if count >= 5 and direction >= 0.07 and dispersion <= 0.035 else "low"
+        registry = load_competition_registry(config.workspace)
+        profile = registry.resolve(identity.get("competition_id"), identity.get("competition_name"))
+        formats = load_competition_formats(config.workspace / "config" / "competition-formats.json")
+        competition_format = formats.get(
+            f"id:{identity.get('competition_id')}",
+            formats.get(str(identity.get("competition_name") or ""), "unknown"),
+        )
+        sample = _automatic_evaluation_stats(connection, "research-shadow-v1", available_at).get(("16", target), {})
+        confidence = confidence_assessment(
+            registry,
+            profile,
+            consensus,
+            bookmaker_count=int(features["bookmaker_count"]),
+            direction_strength=float(features["direction_strength"]),
+            bookmaker_dispersion=float(features["bookmaker_dispersion"]),
+            automatic_verified_fixtures=int(sample.get("fixture_count", 0)),
+            evaluation_span_days=float(sample.get("span_days", 0.0)),
+            competition_format=competition_format,
+        )
+        base_confidence = str(confidence["confidence_label"])
         prediction = {
             "record_id": stable_id("ephemeral_k1_prediction", fixture_id, target, cutoff.isoformat()),
             "channel": "research-shadow-v1", "fixture_id": fixture_id, "target": target,
@@ -1122,7 +1491,12 @@ def _replay_one(
             "published_at": available_at.isoformat().replace("+00:00", "Z"),
             "competition_id": "16", "identity_record_id": identity["record_id"],
             "selected_batch_record_id": batch["record_id"], "probabilities": probabilities,
-            "confidence_label": base_confidence,
+            "bookmaker_count": features.get("bookmaker_count"),
+            "direction_strength": features.get("direction_strength"),
+            "bookmaker_dispersion": features.get("bookmaker_dispersion"),
+            "features": {**features, "competition_format": competition_format},
+            **_profile_fields(registry, profile, identity),
+            **confidence,
         }
         publication_source = "simulated_deadline" if available_at == deadline else "analysis_time"
     assessment = collect_k1_guardrail_assessment(
@@ -1132,11 +1506,50 @@ def _replay_one(
     )
     if assessment is None:
         raise K1GuardrailError("K1 guardrail assessment was not produced")
+    raw_features = assessment["raw_features"]
+    market_update = raw_features.get("market_update") or {}
+    previous_target = PREVIOUS_TARGET.get(target)
+    if include_previous_simulation and previous_target and market_update.get("status") == "not_available":
+        try:
+            previous = _replay_one(
+                connection,
+                config=config,
+                fixture_id=fixture_id,
+                target=previous_target,
+                policy=policy,
+                now=now,
+                prefer_stored_prediction=True,
+                include_previous_simulation=False,
+            )
+            previous_features = previous["guardrail"]["raw_features"]
+            current_components = _component_hashes(
+                raw_features.get("base_input_fingerprint") or {},
+                raw_features.get("guardrail_input_fingerprints") or {},
+            )
+            previous_components = _component_hashes(
+                previous_features.get("base_input_fingerprint") or {},
+                previous_features.get("guardrail_input_fingerprints") or {},
+            )
+            raw_features["market_update"] = _market_update_payload(
+                current_components=current_components,
+                current_probabilities=probabilities,
+                current_features=raw_features,
+                previous_target=previous_target,
+                previous_components=previous_components,
+                previous_probabilities=previous["base_probabilities"],
+                previous_features=previous_features,
+                comparison_time_source=(
+                    "stored_prediction" if previous["publication_time_source"] == "stored_prediction"
+                    else "simulated_previous_target"
+                ),
+            )
+        except K1GuardrailError:
+            pass
     guarded = guarded_presentation(
         probabilities=probabilities, base_confidence=base_confidence,
         action=str(assessment["proposed_action"]), policy=policy,
     )
-    display_features = dict(assessment["raw_features"])
+    display_features = dict(raw_features)
     source_rows = display_features.pop("source_row_record_ids", [])
     display_features["source_row_record_count"] = len(source_rows)
     return {
@@ -1210,6 +1623,7 @@ def analyze_k1(
                         "guardrail_action_adjustment": False,
                     }
                 action = str(item["guardrail"]["action_code"])
+                workflow_features = item["guardrail"]["raw_features"]
                 summaries = {
                     "keep": "护栏保持基础方向和置信。",
                     "caution": "护栏保留基础方向和置信，但要求突出已触发的结构风险。",
@@ -1224,6 +1638,9 @@ def analyze_k1(
                         "policy_canonical_sha256": item["guardrail"]["policy_canonical_sha256"],
                         "source_row_record_count": item["guardrail"]["raw_features"].get("source_row_record_count"),
                         "live_response_set_hashes": item["guardrail"]["raw_features"].get("live_response_set_hashes", []),
+                        "analysis_workflow": workflow_features.get("analysis_workflow"),
+                        "base_input_fingerprint": workflow_features.get("base_input_fingerprint"),
+                        "guardrail_input_fingerprints": workflow_features.get("guardrail_input_fingerprints"),
                     })
                 return {
                     "status": "dry_run", "persisted": False,
@@ -1234,10 +1651,15 @@ def analyze_k1(
                         "prediction_cutoff": item["prediction_cutoff"], "available_at": item["available_at"],
                         "publication_time_source": item["publication_time_source"],
                         "market_semantics": "as_of_cutoff_current",
+                        "market_update": workflow_features.get("market_update", {"status": "not_available"}),
+                        "analysis_workflow": workflow_features.get("analysis_workflow", {"status": "legacy_analysis_flow"}),
                     },
                     "base_prediction": {
                         "probabilities": probabilities, "direction": direction,
                         "confidence_label": item["base_confidence_label"],
+                        "confidence_interpretation": workflow_features.get("confidence_interpretation", {}),
+                        "sample_maturity": workflow_features.get("sample_maturity", {"status": "unvalidated"}),
+                        "input_fingerprint": workflow_features.get("base_input_fingerprint", {}),
                     },
                     "historical_context": history,
                     "guardrail_assessment": {
@@ -1247,6 +1669,9 @@ def analyze_k1(
                         "action_code": action, "rule_evaluations": item["guardrail"]["rule_evaluations"],
                         "rule_flags": item["guardrail"]["rule_flags"], "reasons": item["guardrail"]["reasons"],
                         "features": item["guardrail"]["raw_features"], "thresholds": item["guardrail"]["thresholds"],
+                        "input_quality": workflow_features.get("input_quality", {"core_input_quality": "invalid", "auxiliary_rule_coverage": "limited"}),
+                        "rule_evaluability": workflow_features.get("rule_evaluability", {}),
+                        "input_fingerprints": workflow_features.get("guardrail_input_fingerprints", {}),
                     },
                     "guarded_output": {
                         "action_code": action, "action_label": item["guardrail"]["action_label"],
@@ -1331,11 +1756,125 @@ def _holm_adjust(values: Mapping[str, float]) -> dict[str, float]:
     return adjusted
 
 
+def _forward_descriptive_metrics(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    points: list[tuple[tuple[float, float, float], int]] = []
+    top_probabilities: list[float] = []
+    hits = 0
+    uniform_losses: list[float] = []
+    uniform_briers: list[float] = []
+    uniform_rps: list[float] = []
+    for row in rows:
+        payload = row.get("probabilities") or {}
+        probabilities = tuple(float(payload.get(name, 0)) for name in ("home", "draw", "away"))
+        if any(value <= 0 or value >= 1 for value in probabilities) or abs(sum(probabilities) - 1) > 1e-6:
+            continue
+        actual = 0 if row["home_goals"] > row["away_goals"] else 2 if row["home_goals"] < row["away_goals"] else 1
+        top = max(range(3), key=lambda index: probabilities[index])
+        hits += int(top == actual)
+        top_probabilities.append(probabilities[top])
+        points.append((probabilities, actual))
+        uniform_losses.append(math.log(3))
+        uniform_briers.append(2 / 3)
+        actual_cumulative = (1.0 if actual == 0 else 0.0, 1.0 if actual <= 1 else 0.0)
+        uniform_rps.append(sum((value - actual_value) ** 2 for value, actual_value in zip((1 / 3, 2 / 3), actual_cumulative)) / 2)
+    scoring = _scoring(points)
+    count = len(points)
+    if not count:
+        return {"fixture_count": 0}
+    uniform = {
+        "log_loss": sum(uniform_losses) / count,
+        "brier": sum(uniform_briers) / count,
+        "rps": sum(uniform_rps) / count,
+    }
+    return {
+        "fixture_count": count,
+        "direction_hit_count": hits,
+        "direction_hit_rate": hits / count,
+        "average_top_probability": sum(top_probabilities) / count,
+        "calibration_residual": hits / count - sum(top_probabilities) / count,
+        "log_loss": scoring["log_loss"],
+        "brier": scoring["brier"],
+        "rps": scoring["rps"],
+        "ece": (
+            {"status": "available", "value": scoring["ece"], "bins": scoring["ece_bins"]}
+            if count >= 100 else {"status": "insufficient_sample", "minimum_size": 100}
+        ),
+        "uniform_baseline": uniform,
+        "delta_vs_uniform": {
+            "log_loss": scoring["log_loss"] - uniform["log_loss"],
+            "brier": scoring["brier"] - uniform["brier"],
+            "rps": scoring["rps"] - uniform["rps"],
+        },
+    }
+
+
+def _guardrail_risk_metrics(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    wrong = flagged = flagged_wrong = false_warning = keep = keep_wrong = 0
+    abstain = abstain_avoided = downgrade_wrong = 0
+    for row in rows:
+        probabilities = row.get("probabilities") or {}
+        predicted = max(("home", "draw", "away"), key=lambda name: float(probabilities.get(name, 0)))
+        actual = "home" if row["home_goals"] > row["away_goals"] else "away" if row["home_goals"] < row["away_goals"] else "draw"
+        is_wrong = predicted != actual
+        wrong += int(is_wrong)
+        action = str(row.get("proposed_action") or "keep")
+        is_flagged = action in {"caution", "downgrade", "abstain"}
+        flagged += int(is_flagged)
+        flagged_wrong += int(is_flagged and is_wrong)
+        false_warning += int(is_flagged and not is_wrong)
+        keep += int(action == "keep")
+        keep_wrong += int(action == "keep" and is_wrong)
+        abstain += int(action == "abstain")
+        abstain_avoided += int(action == "abstain" and is_wrong)
+        downgrade_wrong += int(action == "downgrade" and is_wrong)
+    flagged_rate = flagged_wrong / flagged if flagged else None
+    keep_rate = keep_wrong / keep if keep else None
+    return {
+        "base_wrong_direction_count": wrong,
+        "flagged_fixture_count": flagged,
+        "flagged_wrong_direction_count": flagged_wrong,
+        "error_capture_rate": flagged_wrong / wrong if wrong else None,
+        "flagged_error_rate": flagged_rate,
+        "keep_error_rate": keep_rate,
+        "risk_lift_vs_keep": flagged_rate - keep_rate if flagged_rate is not None and keep_rate is not None else None,
+        "false_warning_count": false_warning,
+        "abstain_count": abstain,
+        "abstain_avoided_wrong_count": abstain_avoided,
+        "downgrade_wrong_count": downgrade_wrong,
+    }
+
+
+def _group_forward_metrics(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    dimensions: dict[str, dict[str, list[Mapping[str, Any]]]] = {
+        "by_target": {}, "by_market_update_status": {}, "by_action": {}, "by_sample_maturity": {}, "by_rule": {},
+    }
+    for row in rows:
+        raw = row.get("raw_features") or {}
+        values = {
+            "by_target": str(row.get("target")),
+            "by_market_update_status": str((raw.get("market_update") or {}).get("status") or "legacy_analysis_flow"),
+            "by_action": str(row.get("proposed_action")),
+            "by_sample_maturity": str((raw.get("sample_maturity") or {}).get("status") or "legacy_analysis_flow"),
+        }
+        for dimension, value in values.items():
+            dimensions[dimension].setdefault(value, []).append(row)
+        for rule, evaluation in (row.get("rule_evaluations") or {}).items():
+            dimensions["by_rule"].setdefault(f"{rule}|{evaluation.get('status')}", []).append(row)
+    result = {
+        dimension: {key: _forward_descriptive_metrics(group) for key, group in sorted(groups.items())}
+        for dimension, groups in dimensions.items()
+    }
+    result["overall"] = _forward_descriptive_metrics(rows)
+    result["guardrail_risk"] = _guardrail_risk_metrics(rows)
+    return result
+
+
 def evaluate_k1_guardrail_forward(config: ResearchConfig, *, channel: str, now: datetime | None = None) -> dict[str, Any]:
     from football_cups.database.config import DatabaseConfig
     from football_cups.database.connection import connect
 
     policy = load_k1_guardrail_policy(config.workspace)
+    workflow = load_k1_analysis_workflow(config.workspace)
     database_config = DatabaseConfig.from_workspace(config.workspace)
     with connect(database_config) as connection:
         require_migration(connection)
@@ -1345,7 +1884,8 @@ def evaluate_k1_guardrail_forward(config: ResearchConfig, *, channel: str, now: 
                 """
                 SELECT assessment.*, prediction.probabilities, prediction.status AS prediction_status,
                        result.home_goals, result.away_goals, result.confirmed_at,
-                       result.record_id AS result_record_id, result.verification_method
+                       result.record_id AS result_record_id, result.verification_method,
+                       result.verification_status AS current_result_status
                 FROM research.k1_guardrail_assessments AS assessment
                 JOIN research.shadow_predictions AS prediction
                   ON prediction.record_id=assessment.prediction_record_id
@@ -1361,6 +1901,41 @@ def evaluate_k1_guardrail_forward(config: ResearchConfig, *, channel: str, now: 
     if not evaluated:
         return {"status": "unchanged", "channel": channel, "policy_version": policy.policy_version, "evaluated_fixtures": 0}
     manual_methods = {"manual", "manual-import", "project-owner-manual-declaration"}
+    automatic_rows = [row for row in evaluated if row.get("verification_method") not in manual_methods]
+    if not automatic_rows:
+        return {"status": "unchanged", "channel": channel, "policy_version": policy.policy_version, "evaluated_fixtures": 0}
+    automatic_members = sorted(
+        "|".join(str(row.get(name) or "") for name in (
+            "record_id", "prediction_record_id", "fixture_id", "target", "result_record_id",
+            "verification_method", "home_goals", "away_goals", "current_result_status",
+        ))
+        for row in automatic_rows
+    )
+    automatic_evidence_set_hash = hashlib.sha256("\n".join(automatic_members).encode()).hexdigest()
+    all_members = sorted(
+        "|".join(str(row.get(name) or "") for name in (
+            "record_id", "prediction_record_id", "fixture_id", "target", "result_record_id",
+            "verification_method", "home_goals", "away_goals", "current_result_status",
+        ))
+        for row in evaluated
+    )
+    all_result_sensitivity_hash = hashlib.sha256("\n".join(all_members).encode()).hexdigest()
+    with connect(database_config) as connection:
+        existing = connection.execute(
+            """
+            SELECT record_id FROM research.shadow_evaluations
+            WHERE evaluation_kind='k1_guardrail_forward_v2'
+              AND metrics->>'automatic_evidence_set_hash'=%s
+            ORDER BY evaluated_at DESC, record_id DESC LIMIT 1
+            """,
+            (automatic_evidence_set_hash,),
+        ).fetchone()
+    if existing is not None:
+        return {
+            "status": "unchanged", "channel": channel, "policy_version": policy.policy_version,
+            "automatic_evidence_set_hash": automatic_evidence_set_hash,
+            "evaluation_record_id": existing["record_id"],
+        }
     primary_rules = ("r1_shallow_favorite_cooling", "r2_asian_retreat")
     groups: dict[str, dict[str, Any]] = {}
     p_values: dict[str, float] = {}
@@ -1437,33 +2012,35 @@ def evaluate_k1_guardrail_forward(config: ResearchConfig, *, channel: str, now: 
             group["holm_adjusted_p"] < 0.05,
         ))
     fixture_ids = sorted({str(row["fixture_id"]) for row in evaluated})
-    evaluation_members = sorted(
-        "|".join(str(row.get(name) or "") for name in (
-            "record_id", "prediction_record_id", "fixture_id", "target",
-            "result_record_id", "verification_method",
-        ))
-        for row in evaluated
-    )
-    fixture_set_hash = hashlib.sha256("\n".join(evaluation_members).encode()).hexdigest()
-    confirmed = [row["confirmed_at"] for row in evaluated if row.get("confirmed_at")]
+    confirmed = [row["confirmed_at"] for row in automatic_rows if row.get("confirmed_at")]
     evaluated_through = max(confirmed).astimezone(UTC)
     payload = {
-        "evaluation_kind": "k1_guardrail_forward_v1", "channel": channel,
+        "evaluation_kind": "k1_guardrail_forward_v2", "channel": channel,
         "policy_version": policy.policy_version, "evaluated_through": evaluated_through.isoformat().replace("+00:00", "Z"),
-        "evaluation_fixture_set_hash": fixture_set_hash, "evaluated_fixture_count": len(fixture_ids),
+        "workflow_version": workflow.workflow_version,
+        "automatic_evidence_set_hash": automatic_evidence_set_hash,
+        "all_result_sensitivity_hash": all_result_sensitivity_hash,
+        "evaluated_fixture_count": len(fixture_ids),
         "automatic_fixture_count": len({str(row["fixture_id"]) for row in evaluated if row.get("verification_method") not in manual_methods}),
         "manual_fixture_count": len({str(row["fixture_id"]) for row in evaluated if row.get("verification_method") in manual_methods}),
         "bootstrap_iterations": iterations, "active_confidence_level": confidence,
         "holm_family": sorted(groups), "groups": groups,
+        "descriptive_metrics": {
+            "automatic_results": _group_forward_metrics(automatic_rows),
+            "all_valid_results": _group_forward_metrics(evaluated),
+        },
         "review_eligible": any(group["review_eligible"] for group in groups.values()),
     }
-    record_id = stable_id("research_k1_guardrail_forward", channel, policy.policy_version, payload["evaluated_through"], fixture_set_hash)
+    record_id = stable_id(
+        "research_k1_guardrail_forward_v2", channel, policy.policy_version, workflow.workflow_version,
+        automatic_evidence_set_hash, all_result_sensitivity_hash,
+    )
     record = {
         "schema_version": 1, "record_type": "ResearchShadowEvaluation", "record_id": record_id,
         "research_only": True, "backfill": True, "strict_backtest_eligible": False,
         "cutoff_eligible": False, "research_kind": "model_artifact", "model_key": "k1-guardrail",
         "model_version": policy.policy_version, "evaluated_at": payload["evaluated_through"],
-        "evaluation_kind": payload["evaluation_kind"], "dataset_hash": fixture_set_hash, "metrics": payload,
+        "evaluation_kind": payload["evaluation_kind"], "dataset_hash": automatic_evidence_set_hash, "metrics": payload,
     }
     existing = None
     for path in (config.normalized_dir / "model-artifacts").rglob("*.jsonl") if (config.normalized_dir / "model-artifacts").is_dir() else []:

@@ -94,6 +94,10 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install_collector_task.
 
 韩职K1还读取`config/research-k1-guardrail.json`。只有`prediction_cutoff >= effective_at`的自然K1机会才在同一原子JSONL追加shadow assessment；相关源码未提交时记录`unavailable`而不修改基础预测。新批次manifest必须携带记录哈希和prediction/assessment计数。策略首版拒绝`active`，不得通过任务参数绕过。
 
+K1分析工作流另读取`config/research-k1-analysis-workflow.json`。工作流生效后的assessment保存双层输入指纹、相邻切点更新状态和R4/R5覆盖；这些字段只解释研究输出。影子任务在上海时间每日04:00后执行一次前向评估检查，并在第二次研究导入成功后才原子更新`data/research/state/k1-forward-evaluation-schedule.json`。该状态损坏时任务返回3并告警，不能静默重置。
+
+K1 assessment的可重放指纹只覆盖K1规则、工作流、基础共识/置信依赖和迁移014；无关赛事模块的未提交修改不应阻断K1自然assessment。K1自身相关路径未提交时仍固定写入`unavailable/relevant_source_not_reproducible`。
+
 ```powershell
 .\.venv\Scripts\football-cups-research.exe shadow-predict --workspace . --channel research-shadow-v1 --dry-run
 Get-ChildItem data\research\normalized\shadow-predictions -Recurse -Filter *.jsonl |

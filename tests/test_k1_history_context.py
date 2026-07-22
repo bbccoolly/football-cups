@@ -36,7 +36,7 @@ def _raw_row(*, home: float, draw: float, away: float, asian: float = -0.5) -> d
 
 def test_presentation_contract_and_bins() -> None:
     presentation = load_k1_analysis_presentation(ROOT)
-    assert presentation.version == "k1-analysis-presentation-v1"
+    assert presentation.version == "k1-analysis-presentation-v2"
     assert _probability_bin(0.40) == "0.40-0.45"
     assert _gap_bin(0.10) == "0.10-0.20"
     assert _line_bucket(0.5) == "shallow"

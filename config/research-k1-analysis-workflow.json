@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "workflow_version": "k1-analysis-flow-v2",
+  "effective_at": "2026-07-22T06:00:00Z",
+  "diagnostic_minimum_automatic_fixtures": 30,
+  "daily_evaluation": {
+    "enabled": true,
+    "timezone": "Asia/Shanghai",
+    "local_time": "04:00"
+  }
+}
