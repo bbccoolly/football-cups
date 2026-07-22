@@ -57,8 +57,8 @@
 - 中国体彩官方scope证据已取得，但官方清单/head接口仍受EdgeOne 567影响；首次完整成功前，官方来源子窗口不能起算。
 - 本地PostgreSQL使用trust认证且只绑定 `127.0.0.1:55432`，不得转发或暴露。
 - ECS只有40GB系统盘且没有正式数据盘；至少100GB数据盘、私有OSS恢复闭环和重新授权迁移前，云端timer必须保持禁用。
-- K1规则源码已提交为`9da04a0`且相关路径干净；若未来相关路径再次dirty，只能生成`unavailable/relevant_source_not_reproducible`。
-- 新策略`k1-guardrail-shadow-v2`预注册`effective_at=2026-07-22T06:00:00Z`。部署完成前任务不应产生v2正式assessment；没有规则达到active启用条件。
+- K1 as-of护栏已提交为`82bb48c`且相关路径干净；若未来相关路径再次dirty，只能生成`unavailable/relevant_source_not_reproducible`。
+- 新策略`k1-guardrail-shadow-v2`预注册`effective_at=2026-07-22T06:00:00Z`（北京时间14:00）。影子任务已恢复并手工返回0；今天三场K1的T-6h早于生效时间不补发，首个可能的自然v2窗口为北京时间17:30的T-60m。没有规则达到active启用条件。
 - 广泛赛事可能缺少某类盘口；来源缺盘必须继续与程序失败分开统计。
 
 ## 人工待办
@@ -71,7 +71,7 @@
 
 ## Agent 唯一下一步
 
-完成shadow-v2真实PostgreSQL回放、双层备份和干净提交，在`effective_at`前恢复任务；随后观察首个自然K1 v2 assessment，核对目录级manifest、as-of批次、R5轨迹和中文派生方案。不得补发旧预测或改变基础概率和置信。
+观察北京时间2026-07-22 17:30的首个自然K1 v2 assessment，核对目录级manifest、as-of批次、R5轨迹和中文派生方案；随后运行前向评估确认仍为`review_eligible=false`。不得补发旧预测或改变基础概率和置信。
 
 同时继续核验D-030上线后的自然影子记录，并保持体彩官方补偿每日最多一次，不扩大访问频率；阿里云ECS所有timer继续禁用。
 
