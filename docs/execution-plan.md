@@ -28,6 +28,8 @@
 
 根据 D-032，批次选择还必须满足 `core_observed_at <= prediction_cutoff` 和 `completed_at <= available_at`。自然分析使用实际发布时间，历史模拟使用合法发布 deadline；历史回放只输出到终端，不写 JSONL、manifest、数据库或评估报告。R5只允许同一 target 的多响应轨迹。
 
+根据 D-033，K1历史展示从`research.feature_rows/source_assets`只读查询固定资产，先验证330/228/102及三类哈希，再按label可用时间过滤。cohort分箱和回退由独立版本化展示配置冻结，历史指标不得反馈到shadow prediction或guardrail assessment。
+
 历史研究固定规则：不批量访问 500 历史页面；只下载显式注册的 Football-Data CSV/XLSX；K1 330 行作为派生特征而非原始盘口导入；所有记录均为 retrospective research，不映射到任何正式切点。2025 用于滚动先验，2026 只作已知非盲的时间分离评估。
 
 ## 3. 阶段 1：500 发现与技术验收（并行运行）

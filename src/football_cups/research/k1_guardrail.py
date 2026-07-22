@@ -1151,6 +1151,7 @@ def _replay_one(
         "guardrail": {
             "policy_version": policy.policy_version,
             "policy_canonical_sha256": policy.canonical_sha256,
+            "thresholds": policy.thresholds,
             "policy_was_active_at_cutoff": cutoff >= policy.effective_at,
             "action_code": assessment["proposed_action"],
             "action_label": guarded["action_label"],
@@ -1170,6 +1171,7 @@ def analyze_k1(
     fixture_id: str,
     target: str | None,
     latest_available_target: bool,
+    audit: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     from football_cups.database.config import DatabaseConfig
@@ -1192,7 +1194,68 @@ def analyze_k1(
                 cutoff = _utc(item["prediction_cutoff"], "prediction_cutoff")
                 if latest_available_target and not (cutoff <= observed < kickoff):
                     continue
-                return {"status": "dry_run", "persisted": False, "analysis": item}
+                from .k1_history_context import build_k1_historical_context
+
+                probabilities = item["base_probabilities"]
+                direction = max(("home", "draw", "away"), key=lambda name: float(probabilities.get(name, 0)))
+                try:
+                    history = build_k1_historical_context(
+                        connection, workspace=config.workspace, analysis=item,
+                    )
+                except K1GuardrailError as exc:
+                    history = {
+                        "status": "unavailable", "reason": str(exc),
+                        "comparison_scope": "final_closing_vs_as_of_cutoff_current",
+                        "context_only": True, "probability_adjustment": False,
+                        "guardrail_action_adjustment": False,
+                    }
+                action = str(item["guardrail"]["action_code"])
+                summaries = {
+                    "keep": "护栏保持基础方向和置信。",
+                    "caution": "护栏保留基础方向和置信，但要求突出已触发的结构风险。",
+                    "downgrade": "护栏保留基础概率和方向，并将派生置信限制为low。",
+                    "abstain": "护栏保留基础概率用于审计，但不输出护栏后方向。",
+                }
+                audit_summary = {"included": bool(audit)}
+                if audit:
+                    audit_summary.update({
+                        "identity_record_id": item["identity_record_id"],
+                        "selected_batch_record_id": item["selected_batch_record_id"],
+                        "policy_canonical_sha256": item["guardrail"]["policy_canonical_sha256"],
+                        "source_row_record_count": item["guardrail"]["raw_features"].get("source_row_record_count"),
+                        "live_response_set_hashes": item["guardrail"]["raw_features"].get("live_response_set_hashes", []),
+                    })
+                return {
+                    "status": "dry_run", "persisted": False,
+                    "analysis_context": {
+                        "fixture_id": item["fixture_id"], "competition_id": "16",
+                        "home_team_name": item["home_team_name"], "away_team_name": item["away_team_name"],
+                        "kickoff_at": item["kickoff_at"], "target": item["target"],
+                        "prediction_cutoff": item["prediction_cutoff"], "available_at": item["available_at"],
+                        "publication_time_source": item["publication_time_source"],
+                        "market_semantics": "as_of_cutoff_current",
+                    },
+                    "base_prediction": {
+                        "probabilities": probabilities, "direction": direction,
+                        "confidence_label": item["base_confidence_label"],
+                    },
+                    "historical_context": history,
+                    "guardrail_assessment": {
+                        "policy_version": item["guardrail"]["policy_version"],
+                        "policy_canonical_sha256": item["guardrail"]["policy_canonical_sha256"],
+                        "policy_was_active_at_cutoff": item["guardrail"]["policy_was_active_at_cutoff"],
+                        "action_code": action, "rule_evaluations": item["guardrail"]["rule_evaluations"],
+                        "rule_flags": item["guardrail"]["rule_flags"], "reasons": item["guardrail"]["reasons"],
+                        "features": item["guardrail"]["raw_features"], "thresholds": item["guardrail"]["thresholds"],
+                    },
+                    "guarded_output": {
+                        "action_code": action, "action_label": item["guardrail"]["action_label"],
+                        "direction": item["guardrail"]["guarded_direction"],
+                        "confidence_label": item["guardrail"]["guarded_confidence_label"],
+                        "summary": summaries[action],
+                    },
+                    "audit_summary": audit_summary,
+                }
             except K1GuardrailError as exc:
                 errors.append(f"{candidate}:{exc}")
         raise K1GuardrailError("no available K1 analysis target: " + "; ".join(errors))

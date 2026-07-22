@@ -1,8 +1,8 @@
 # 韩职 K1 盘口规则护栏设计
 
-> 版本：V4.2
+> 版本：V4.3
 > 日期：2026-07-22
-> 状态：shadow-v2 as-of输入、只读分析和无存储历史回放已实现；等待首个自然v2 assessment
+> 状态：shadow-v2 as-of输入、历史证据展示和无存储回放已实现；等待首个自然v2 assessment
 
 ## 1. 结论与目标
 
@@ -24,6 +24,8 @@ abstain    数据不可信，或多个独立市场同时反对当前方向
 - 前向验证通过只产生 `review_eligible=true`；必须由项目负责人新增决策并启用新的策略版本，才允许实际 `downgrade` 或 `abstain`。
 
 330 场历史数据只用于提出和冻结候选规则。它不能证明因果关系，也不能直接授权生产动作。
+
+根据D-033，人工分析可额外展示截止前可用的历史closing上下文。历史数据按冻结分箱选择不少于30场的最具体cohort，报告整体、赛季、规则代理和5场样例；它固定为证据解释层，不修改当前概率或护栏动作。历史回放还必须满足`label_available_at <= prediction_cutoff`。
 
 ### 1.1 As-of close
 
@@ -384,6 +386,7 @@ football-cups-research analyze-k1 `
   --workspace . `
   --fixture-id <id> `
   --target T-6h `
+  --format detailed `
   --dry-run
 
 football-cups-research blind-test-k1-guardrail `

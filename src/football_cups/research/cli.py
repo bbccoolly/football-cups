@@ -26,6 +26,7 @@ from .k1_guardrail import (
     evaluate_k1_guardrail_forward,
     evaluate_k1_guardrail_history,
 )
+from .k1_history_context import render_k1_analysis
 from .normalize import (
     ResearchIntegrityError,
     ResearchNormalizeError,
@@ -109,6 +110,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     analyze_target = analyze.add_mutually_exclusive_group(required=True)
     analyze_target.add_argument("--target", choices=["T-24h", "T-6h", "T-60m", "T-10m"])
     analyze_target.add_argument("--latest-available-target", action="store_true")
+    analyze.add_argument("--format", choices=["detailed", "summary", "json"], default="detailed")
+    analyze.add_argument("--audit", action="store_true")
     analyze.add_argument("--dry-run", action="store_true", required=True)
     blind = subparsers.add_parser("blind-test-k1-guardrail")
     _workspace(blind)
@@ -244,10 +247,20 @@ def main(argv: list[str] | None = None) -> int:
             print(json_dumps(evaluate_k1_guardrail_forward(config, channel=args.channel), indent=2))
             return 0
         if args.command == "analyze-k1":
-            print(json_dumps(analyze_k1(
+            if args.audit and args.format == "summary":
+                raise ValueError("--audit cannot be combined with --format summary")
+            result = analyze_k1(
                 config, fixture_id=args.fixture_id, target=args.target,
                 latest_available_target=bool(args.latest_available_target),
-            ), indent=2))
+                audit=bool(args.audit),
+            )
+            if args.format == "json":
+                print(json_dumps(result, indent=2))
+            else:
+                print(render_k1_analysis(
+                    result, workspace=config.workspace,
+                    summary=args.format == "summary", audit=bool(args.audit),
+                ), end="")
             return 0
         if args.command == "blind-test-k1-guardrail":
             if bool(args.fixture_id) == bool(args.since or args.until):

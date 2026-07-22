@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "presentation_version": "k1-analysis-presentation-v1",
+  "minimum_cohort_size": 30,
+  "minimum_season_size": 30,
+  "ece_minimum_size": 100,
+  "example_count": 5,
+  "wilson_confidence": 0.90,
+  "bootstrap_confidence": 0.90,
+  "bootstrap_iterations": 10000,
+  "probability_bins": [0.40, 0.45, 0.50, 0.55],
+  "direction_gap_bins": [0.05, 0.10, 0.20],
+  "rule_labels": {
+    "r0_data_integrity": "数据完整性",
+    "r1_shallow_favorite_cooling": "浅盘热门降温",
+    "r2_asian_retreat": "亚洲盘退让",
+    "r2_euro_strong_asian_flat": "欧强亚浅",
+    "r3_low_total_draw_tail": "低总球平局尾部",
+    "r4_handicap_cover_conflict": "让球指数覆盖冲突",
+    "r5_live_market_stability": "多段盘口稳定性",
+    "r6_bookmaker_dispersion": "公司分歧过高"
+  },
+  "status_labels": {
+    "matched": "触发",
+    "not_matched": "未触发",
+    "not_evaluable": "不可评估"
+  }
+}
