@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "policy_version": "europe-market-guardrail-shadow-v1",
+  "policy_revision": 1,
+  "status": "shadow",
+  "effective_at": "2026-07-22T06:00:00Z",
+  "competition_ids": ["63", "101"],
+  "targets": ["T-24h", "T-6h", "T-60m", "T-10m"],
+  "input_policy": {
+    "opening_source": "provider_declared_opening_from_selected_v2_row",
+    "close_source": "selected_v2_row_current",
+    "close_semantics": "as_of_cutoff_current",
+    "batch_selection": "latest_model_eligible_batch_at_or_before_cutoff",
+    "cross_target_mixing": false,
+    "cross_batch_market_mixing": false,
+    "bookmaker_identity": "source_id_then_exact_normalized_name"
+  },
+  "presentation_policy": {
+    "version": "europe-guardrail-presentation-v1",
+    "keep": {"label": "保持", "confidence_action": "unchanged"},
+    "caution": {"label": "谨慎", "confidence_action": "unchanged"},
+    "downgrade": {"label": "降置信", "confidence_cap": "low"},
+    "abstain": {"label": "回避", "direction_action": "suppress"}
+  },
+  "thresholds": {
+    "minimum_bookmakers_per_market": 3,
+    "minimum_institution_analysis_bookmakers": 5,
+    "weak_direction_gap": 0.07,
+    "material_probability_move": 0.015,
+    "material_asian_line_move": 0.25,
+    "material_total_line_move": 0.25,
+    "signal_support_ratio": 0.60,
+    "high_dispersion": 0.035,
+    "robust_z_threshold": 3.5,
+    "absolute_anomaly_floor": 0.03,
+    "leave_one_out_probability_shift": 0.03,
+    "trajectory_observation_count": 3,
+    "trajectory_span_seconds": 1800,
+    "unchanged_probability_tolerance": 0.0025,
+    "source_margin_minimum": 1.0,
+    "source_margin_maximum": 1.20
+  },
+  "forward_gate": {
+    "minimum_automatic_fixtures": 200,
+    "minimum_span_days": 90,
+    "minimum_rule_hits": 50
+  }
+}

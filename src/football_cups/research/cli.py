@@ -27,6 +27,15 @@ from .k1_guardrail import (
     evaluate_k1_guardrail_history,
 )
 from .k1_history_context import render_k1_analysis
+from .europe_guardrail import (
+    CHANNEL_DEFAULT as EUROPE_CHANNEL_DEFAULT,
+    EuropeGuardrailError,
+    analyze_europe,
+    evaluate_europe_guardrail_forward,
+    publish_europe_guardrail_shadow,
+    render_europe_analysis,
+    replay_europe_guardrail,
+)
 from .normalize import (
     ResearchIntegrityError,
     ResearchNormalizeError,
@@ -120,6 +129,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     blind.add_argument("--until")
     blind.add_argument("--target", action="append", choices=["T-24h", "T-6h", "T-60m", "T-10m"])
     blind.add_argument("--reveal-result", action="store_true")
+    europe_shadow = subparsers.add_parser("europe-guardrail-shadow")
+    _workspace(europe_shadow)
+    europe_shadow.add_argument("--channel", default=EUROPE_CHANNEL_DEFAULT)
+    europe_shadow.add_argument("--target", action="append", choices=["T-24h", "T-6h", "T-60m", "T-10m"])
+    europe_shadow.add_argument("--dry-run", action="store_true")
+    europe_analyze = subparsers.add_parser("analyze-europe")
+    _workspace(europe_analyze)
+    europe_analyze.add_argument("--fixture-id", required=True)
+    europe_target = europe_analyze.add_mutually_exclusive_group(required=True)
+    europe_target.add_argument("--target", choices=["T-24h", "T-6h", "T-60m", "T-10m"])
+    europe_target.add_argument("--latest-available-target", action="store_true")
+    europe_analyze.add_argument("--format", choices=["detailed", "summary", "json"], default="detailed")
+    europe_analyze.add_argument("--audit", action="store_true")
+    europe_analyze.add_argument("--dry-run", action="store_true", required=True)
+    europe_replay = subparsers.add_parser("replay-europe-guardrail")
+    _workspace(europe_replay)
+    europe_replay.add_argument("--fixture-id", action="append")
+    europe_replay.add_argument("--since")
+    europe_replay.add_argument("--until")
+    europe_replay.add_argument("--target", action="append", choices=["T-24h", "T-6h", "T-60m", "T-10m"])
+    europe_replay.add_argument("--reveal-result", action="store_true")
+    europe_forward = subparsers.add_parser("evaluate-europe-guardrail-forward")
+    _workspace(europe_forward)
+    europe_forward.add_argument("--channel", default=EUROPE_CHANNEL_DEFAULT)
     return parser.parse_args(argv)
 
 
@@ -272,7 +305,40 @@ def main(argv: list[str] | None = None) -> int:
                 reveal_result=bool(args.reveal_result),
             ), indent=2))
             return 0
-    except (ValueError, ResearchNormalizeError, ResearchImportError, ResearchModelError, K1GuardrailError) as exc:
+        if args.command == "europe-guardrail-shadow":
+            print(json_dumps(publish_europe_guardrail_shadow(
+                config, channel=args.channel, targets=args.target, dry_run=bool(args.dry_run),
+            ), indent=2))
+            return 0
+        if args.command == "analyze-europe":
+            if args.audit and args.format == "summary":
+                raise ValueError("--audit cannot be combined with --format summary")
+            result = analyze_europe(
+                config, fixture_id=args.fixture_id, target=args.target,
+                latest_available_target=bool(args.latest_available_target), audit=bool(args.audit),
+            )
+            if args.format == "json":
+                print(json_dumps(result, indent=2))
+            else:
+                print(render_europe_analysis(result, summary=args.format == "summary", audit=bool(args.audit)), end="")
+            return 0
+        if args.command == "replay-europe-guardrail":
+            if bool(args.fixture_id) == bool(args.since or args.until):
+                raise ValueError("use either --fixture-id or the complete --since/--until range")
+            if not args.fixture_id and not (args.since and args.until):
+                raise ValueError("--since and --until must be provided together")
+            print(json_dumps(replay_europe_guardrail(
+                config, fixture_ids=args.fixture_id, since=_rfc3339(args.since),
+                until=_rfc3339(args.until), targets=args.target,
+                reveal_result=bool(args.reveal_result),
+            ), indent=2))
+            return 0
+        if args.command == "evaluate-europe-guardrail-forward":
+            print(json_dumps(evaluate_europe_guardrail_forward(
+                config, channel=args.channel,
+            ), indent=2))
+            return 0
+    except (ValueError, ResearchNormalizeError, ResearchImportError, ResearchModelError, K1GuardrailError, EuropeGuardrailError) as exc:
         print(json_dumps({"status": "invalid", "error_type": type(exc).__name__, "error": str(exc)}, indent=2))
         return 2
     except (AccessPolicyError, BudgetExceeded, IntegrityError, ResearchIntegrityError) as exc:

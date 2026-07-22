@@ -177,6 +177,17 @@ scripts\windows\install_shadow_prediction_task.ps1 -Workspace .
 
 D-034增加`research-k1-analysis-workflow.json`。未来K1 assessment冻结基础欧赔输入和护栏三市场输入的独立canonical哈希，并与前一自然切点比较`unchanged/partial_update/full_update`；模拟回放只读展示时必须标记模拟前序来源。工作流字段不参与R0-R6动作。`evaluate-k1-guardrail-forward`输出V2概率评分、均匀基线、风险捕获和自动/人工拆分，只有自动证据集合哈希变化才写入新评估。
 
+迁移015实现D-035欧战盘口差异护栏。适用范围严格为欧冠`competition_id=101`和欧罗巴`63`，策略文件为`config/research-europe-guardrail.json`。它不依赖`ResearchModelActivation`：同一 target、截止时间和可用时间内的最后一个模型合格 V2 批次提供三类市场，基础概率只取逐公司去水欧赔中位数。公司 ID 不可用时只允许 NFC、去首尾空格和合并空白后的精确名称；ID/名称映射冲突或重复行只作为不可配对机构证据，不能模糊合并或删除真实异议。异常、持续不变、单点跳变、跨市场冲突、MAD 和 leave-one-out 全部保存为审计细节，规则不得修改基础概率或反转方向。
+
+```powershell
+.\.venv\Scripts\football-cups-research.exe europe-guardrail-shadow --workspace . --dry-run
+.\.venv\Scripts\football-cups-research.exe analyze-europe --workspace . --fixture-id <id> --target T-60m --format detailed --dry-run
+.\.venv\Scripts\football-cups-research.exe replay-europe-guardrail --workspace . --fixture-id <id> --target T-60m
+.\.venv\Scripts\football-cups-research.exe evaluate-europe-guardrail-forward --workspace . --channel research-europe-guardrail-v1
+```
+
+`replay-europe-guardrail`默认隐藏赛果，使用`--reveal-result`只在分析完成后展示，并始终标记`retrospective_as_of_replay/persisted=false/forward_gate_eligible=false`。自然窗口仅在`prediction_cutoff >= effective_at`时追加 assessment；无数据追加 abstention，错过窗口不得补发。前向评估只使用策略生效后的自然 assessment，自动赛果与负责人声明分开报告；达到同赛事、同切点200场自动验证且90天跨度、单规则50次触发时只产生`review_eligible`，不自动启用任何动作。
+
 ```powershell
 .\.venv\Scripts\football-cups-research.exe evaluate-k1-guardrail-history --workspace .
 .\.venv\Scripts\football-cups-research.exe evaluate-k1-guardrail-forward --workspace . --channel research-shadow-v1

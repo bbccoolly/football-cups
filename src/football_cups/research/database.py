@@ -18,6 +18,10 @@ from . import SCHEMA_VERSION, research_flags
 from .config import ResearchConfig
 from .competition_profiles import CONFIDENCE_RANK, valid_sha256
 from .k1_guardrail import K1GuardrailError, validate_assessment_record, verify_shadow_manifest
+from .europe_guardrail import (
+    EuropeGuardrailError,
+    validate_europe_assessment_record,
+)
 
 
 SUPPORTED_TYPES = frozenset(
@@ -32,6 +36,7 @@ SUPPORTED_TYPES = frozenset(
         "ResearchModelActivation",
         "ResearchShadowPrediction",
         "ResearchK1GuardrailAssessment",
+        "ResearchEuropeGuardrailAssessment",
         "ResearchRetrospectiveEvaluation",
         "ResearchShadowEvaluation",
     }
@@ -135,6 +140,10 @@ def _validate(record: Any, source_file: str, line_number: int) -> dict[str, Any]
     try:
         validate_assessment_record(record)
     except K1GuardrailError as exc:
+        raise ResearchImportIntegrityError(f"{source_file}:{line_number}: {exc}") from exc
+    try:
+        validate_europe_assessment_record(record)
+    except EuropeGuardrailError as exc:
         raise ResearchImportIntegrityError(f"{source_file}:{line_number}: {exc}") from exc
     return record
 
@@ -458,6 +467,45 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
                 record["audit_status"], Jsonb(record),
             ),
         )
+    elif record_type == "ResearchEuropeGuardrailAssessment":
+        connection.execute(
+            """
+            INSERT INTO research.europe_guardrail_assessments(
+                record_id, channel, fixture_id, competition_id, target,
+                prediction_cutoff, assessed_at, policy_version, policy_revision,
+                policy_status, policy_snapshot, policy_file_sha256,
+                policy_canonical_sha256, git_commit, relevant_source_tree_sha256,
+                relevant_dirty_paths, identity_record_id, selected_batch_record_id,
+                snapshot_record_ids, source_row_record_ids, source_hashes,
+                base_probabilities, base_direction, institution_details, trajectory,
+                raw_features, rule_evaluations, rule_flags, proposed_action,
+                proposed_confidence_cap, reasons, audit_status, payload
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
+            ) ON CONFLICT (record_id) DO NOTHING
+            """,
+            (
+                record_id, record["channel"], str(record["fixture_id"]), record["competition_id"],
+                record["target"], record["prediction_cutoff"], record["assessed_at"],
+                record["policy_version"], record["policy_revision"], record["policy_status"],
+                Jsonb(record["policy_snapshot"]), record["policy_file_sha256"],
+                record["policy_canonical_sha256"], record.get("git_commit"),
+                record["relevant_source_tree_sha256"], Jsonb(record.get("relevant_dirty_paths") or []),
+                record.get("identity_record_id"), record.get("selected_batch_record_id"),
+                Jsonb(record.get("snapshot_record_ids") or {}),
+                Jsonb(record.get("source_row_record_ids") or []),
+                Jsonb(record.get("source_hashes") or {}),
+                Jsonb(record.get("base_probabilities") or {}), record.get("base_direction"),
+                Jsonb(record.get("institution_details") or {}), Jsonb(record.get("trajectory") or {}),
+                Jsonb(record.get("raw_features") or {}), Jsonb(record.get("rule_evaluations") or {}),
+                Jsonb(record.get("rule_flags") or []), record["proposed_action"],
+                record.get("proposed_confidence_cap"), Jsonb(record.get("reasons") or []),
+                record["audit_status"], Jsonb(record),
+            ),
+        )
     elif record_type in {"ResearchRetrospectiveEvaluation", "ResearchShadowEvaluation"}:
         table = (
             "retrospective_evaluations"
@@ -488,13 +536,16 @@ def _insert_typed(connection: Connection, record: dict[str, Any]) -> None:
 def _insert_record(
     connection: Connection, record: dict[str, Any], source_file: str, line_number: int
 ) -> bool:
-    if record.get("record_type") == "ResearchK1GuardrailAssessment":
+    if record.get("record_type") in {
+        "ResearchK1GuardrailAssessment",
+        "ResearchEuropeGuardrailAssessment",
+    }:
         prior = connection.execute(
             "SELECT payload FROM research.records WHERE record_id=%s", (record["record_id"],)
         ).fetchone()
         if prior is not None and prior["payload"] != record:
             raise ResearchImportIntegrityError(
-                f"{source_file}:{line_number}: immutable K1 assessment payload changed"
+                f"{source_file}:{line_number}: immutable guardrail assessment payload changed"
             )
     inserted = connection.execute(
         """
@@ -635,6 +686,7 @@ def run_database_import(config: ResearchConfig) -> dict[str, Any]:
             "model_activations",
             "shadow_predictions",
             "k1_guardrail_assessments",
+            "europe_guardrail_assessments",
             "retrospective_evaluations",
             "shadow_evaluations",
         )
